@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>YouTube Similar Channels Finder</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="common.css" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <h1>YouTube Similar Channels Finder</h1>
+        <p>输入一个 YouTube 频道链接，找到相似的加密货币 KOL 频道</p>
+      </div>
+
+      <div class="search-section">
+        <h2>Search for 3 topics</h2>
+        <div class="topic-buttons" id="topic-buttons">
+          <button class="topic-btn" data-topic="crypto trading">Crypto Trading</button>
+          <button class="topic-btn" data-topic="bitcoin">Bitcoin</button>
+          <button class="topic-btn" data-topic="airdrops">Airdrops</button>
+          <button class="topic-btn" data-topic="defi">DeFi</button>
+          <button class="topic-btn" data-topic="technical analysis">Technical Analysis</button>
+          <button class="topic-btn" data-topic="ethereum">Ethereum</button>
+          <button class="topic-btn" data-topic="altcoins">Altcoins</button>
+        </div>
+
+        <div class="input-group" style="margin-top: 20px;">
+          <label>频道链接</label>
+          <input type="text" id="channel-url" placeholder="https://www.youtube.com/@Crypto621" />
+        </div>
+
+        <div class="filter-row">
+          <div class="input-group">
+            <label>订阅数 (Min)</label>
+            <input type="number" id="min-subs" placeholder="0" />
+          </div>
+          <div class="input-group">
+            <label>订阅数 (Max)</label>
+            <input type="number" id="max-subs" placeholder="200000" />
+          </div>
+        </div>
+
+        <div class="filter-row">
+          <div class="input-group">
+            <label>最低相似度</label>
+            <input type="number" id="min-sim" step="0.05" value="0.35" min="0" max="1" />
+          </div>
+          <div class="input-group">
+            <label>返回数量</label>
+            <input type="number" id="max-results" value="30" min="5" max="100" />
+          </div>
+        </div>
+
+        <!-- BD模式开关 -->
+        <div class="bd-mode-toggle" id="bd-mode-toggle">
+          <label>
+            <input type="checkbox" id="bd-mode" />
+            <span>🎯 BD模式</span>
+          </label>
+          <span class="bd-mode-hint">交易所BD专用</span>
+        </div>
+
+        <div class="action-buttons">
+          <button class="btn btn-primary" id="search-btn">Search</button>
+          <button class="btn btn-secondary" id="export-btn">Export CSV</button>
+        </div>
+      </div>
+
+      <div class="search-section">
+        <div class="results-header">
+          <div>
+            <h2>搜索结果</h2>
+            <div class="results-count" id="results-count">还没有结果，先在上面输入频道链接并搜索。</div>
+          </div>
+          <div class="sort-filter">
+            <div class="sort-dropdown">
+              <button class="btn-icon" id="sort-btn">
+                <span>⇅</span> Sort
+              </button>
+              <div class="dropdown-menu" id="sort-menu">
+                <div class="dropdown-item" data-sort="total_score" data-dir="desc">
+                  <span>总评分</span>
+                  <span class="sort-direction">↓</span>
+                </div>
+                <div class="dropdown-item bd-sort-option" data-sort="bd_total_score" data-dir="desc" style="display:none;">
+                  <span>🎯 BD总分</span>
+                  <span class="sort-direction">↓</span>
+                </div>
+                <div class="dropdown-item" data-sort="similarity" data-dir="desc">
+                  <span>相似度</span>
+                  <span class="sort-direction">↓</span>
+                </div>
+                <div class="dropdown-item" data-sort="subscriberCount" data-dir="desc">
+                  <span>订阅数</span>
+                  <span class="sort-direction">↓</span>
+                </div>
+                <div class="dropdown-item" data-sort="viewCount" data-dir="desc">
+                  <span>浏览量</span>
+                  <span class="sort-direction">↓</span>
+                </div>
+                <div class="dropdown-item" data-sort="videoCount" data-dir="desc">
+                  <span>视频数</span>
+                  <span class="sort-direction">↓</span>
+                </div>
+                <div class="dropdown-item" data-sort="engagement_rate" data-dir="desc">
+                  <span>互动率 E.R.</span>
+                  <span class="sort-direction">↓</span>
+                </div>
+              </div>
+            </div>
+            <div class="filter-panel">
+              <button class="btn-icon" id="filter-btn">
+                <span>🔽</span> Filter
+              </button>
+              <div class="dropdown-menu filter-panel-content" id="filter-menu">
+                <div class="filter-section">
+                  <h3>Topics</h3>
+                  <div class="filter-tags" id="filter-topics"></div>
+                </div>
+                <div class="filter-section">
+                  <h3>Audience</h3>
+                  <div class="filter-tags" id="filter-audience"></div>
+                </div>
+                <div class="filter-section">
+                  <h3>订阅数范围</h3>
+                  <div class="filter-range">
+                    <input type="number" id="filter-min-subs" placeholder="最小">
+                    <span>-</span>
+                    <input type="number" id="filter-max-subs" placeholder="最大">
+                  </div>
+                </div>
+                <div class="filter-actions">
+                  <button class="btn-apply" id="apply-filter">应用</button>
+                  <button class="btn-reset" id="reset-filter">重置</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      <div id="results"></div>
+    </div>
+    <div id="toast-container" class="toast-container"></div>
+  </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
+

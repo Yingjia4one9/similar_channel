@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# API Keys and sensitive files
+YouTube api key.txt
+*.key
+*.pem
+.env
+.env.local
+
+# Configuration files (may contain sensitive data)
+config.json
+!config.json.example
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+channel_index.db
+quota_tracker.db
+
+# Cache and temporary files
+*.log
+*.cache
+.cache/
+.pytest_cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# FAISS index files
+.faiss_index.pkl
+
+# Project specific
+result_cache/
+

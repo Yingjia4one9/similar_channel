@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Similar Channels</title>
+  <link rel="stylesheet" href="common.css">
+  <link rel="stylesheet" href="sidebar.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>YouTube Similar Channels</h1>
+      <p>查找相似的加密货币 KOL 频道</p>
+    </div>
+
+    <div class="search-section">
+      <div class="input-group">
+        <label>频道链接</label>
+        <input type="text" id="channel-url" placeholder="自动检测或手动输入" />
+      </div>
+
+      <div class="filter-row">
+        <div class="input-group">
+          <label>订阅数 (Min)</label>
+          <input type="number" id="min-subs" placeholder="0" />
+        </div>
+        <div class="input-group">
+          <label>订阅数 (Max)</label>
+          <input type="number" id="max-subs" placeholder="200000" />
+        </div>
+      </div>
+
+      <div class="filter-row">
+        <div class="input-group">
+          <label>最低相似度</label>
+          <input type="number" id="min-sim" step="0.05" value="0.35" min="0" max="1" />
+        </div>
+        <div class="input-group">
+          <label>返回数量</label>
+          <input type="number" id="max-results" value="30" min="5" max="100" />
+        </div>
+      </div>
+
+      <!-- BD模式开关 -->
+      <div class="bd-mode-toggle" id="bd-mode-toggle">
+        <label>
+          <input type="checkbox" id="bd-mode" />
+          <span>🎯 BD模式</span>
+        </label>
+        <span class="bd-mode-hint">交易所BD专用</span>
+      </div>
+
+      <div class="action-buttons">
+        <button class="btn btn-primary" id="search-btn">Search</button>
+        <button class="btn btn-secondary" id="export-btn">Export</button>
+      </div>
+    </div>
+
+    <div class="results-section">
+      <div class="results-header">
+        <div>
+          <h2>搜索结果</h2>
+          <div class="results-count" id="results-count">等待搜索...</div>
+        </div>
+      </div>
+      <div id="results"></div>
+    </div>
+    <div id="toast-container" class="toast-container"></div>
+  </div>
+
+  <script src="sidebar.js"></script>
+</body>
+</html>
+

@@ -1,0 +1,39 @@
+{
+  "development": {
+    "comment": "开发环境配置示例",
+    "note": "此文件仅作为示例，实际配置应通过环境变量或创建config.json文件",
+    "api_timeout": 10,
+    "db_timeout": 30.0,
+    "cache_ttl": {
+      "channel_info": 7200,
+      "channel_videos": 1800
+    },
+    "embedding_batch_size": 32,
+    "concurrent_processing": {
+      "search_workers": 5,
+      "video_fetch_workers": 10,
+      "index_build_workers": 5
+    }
+  },
+  "production": {
+    "comment": "生产环境配置示例",
+    "note": "生产环境建议使用环境变量，而不是配置文件",
+    "api_timeout": 15,
+    "db_timeout": 30.0,
+    "cache_ttl": {
+      "channel_info": 7200,
+      "channel_videos": 1800
+    },
+    "embedding_batch_size": 32,
+    "concurrent_processing": {
+      "search_workers": 5,
+      "video_fetch_workers": 10,
+      "index_build_workers": 5
+    }
+  },
+  "default": {
+    "comment": "默认配置（当环境变量未设置时使用）",
+    "note": "敏感信息（如API Key）不应放在配置文件中，应使用环境变量"
+  }
+}
+
