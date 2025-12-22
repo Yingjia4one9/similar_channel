@@ -40,7 +40,7 @@ from core.channel_info import get_batch_request_stats
 logger = get_logger()
 
 
-app = FastAPI(title="YouTube Similar Channel Backend")
+app = FastAPI(title="YouTube Similar Channel")
 
 # CORS配置：允许的来源可通过环境变量配置
 # 开发环境：默认允许所有来源（支持本地file://打开）

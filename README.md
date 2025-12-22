@@ -5,7 +5,7 @@
 项目已重新组织为以下结构：
 
 ```
-yt-similar-backend/
+yt-similar_channel/
 ├── app/                    # 应用入口
 │   ├── __init__.py
 │   └── main.py            # FastAPI 主应用
