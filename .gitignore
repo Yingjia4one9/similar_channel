@@ -33,7 +33,8 @@ ENV/
 *~
 
 # API Keys and sensitive files
-YouTube api key.txt
+YouTube api key*.txt
+*api key*.txt
 *.key
 *.pem
 .env
