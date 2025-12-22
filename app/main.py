@@ -6,9 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from logger import get_logger
-from config import Config
-from quota_tracker import (
+from infrastructure.logger import get_logger
+from infrastructure.config import Config
+from infrastructure.quota_tracker import (
     get_quota_usage_today,
     get_quota_usage_by_endpoint,
     get_quota_status,
@@ -25,7 +25,7 @@ from quota_tracker import (
     get_quota_usage_logs,
     clean_legacy_quota_records,
 )
-from result_cache import (
+from infrastructure.result_cache import (
     generate_result_id,
     store_result,
     get_result,
@@ -33,9 +33,9 @@ from result_cache import (
     get_cache_stats,
     generate_cache_key,
 )
-from xss_protection import validate_and_sanitize_request
-from youtube_client import get_similar_channels_by_url
-from channel_info import get_batch_request_stats
+from infrastructure.xss_protection import validate_and_sanitize_request
+from core.youtube_client import get_similar_channels_by_url
+from core.channel_info import get_batch_request_stats
 
 logger = get_logger()
 

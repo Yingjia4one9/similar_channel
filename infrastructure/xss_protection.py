@@ -5,7 +5,7 @@ XSS防护模块
 import re
 from typing import Any, Dict, List
 
-from logger import get_logger
+from infrastructure.logger import get_logger
 
 logger = get_logger()
 

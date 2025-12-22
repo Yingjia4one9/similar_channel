@@ -7,9 +7,9 @@ from typing import Any, Dict
 
 import requests
 
-from config import Config
-from logger import get_logger
-from quota_tracker import record_quota_usage, check_and_update_rate_limit, get_rate_limit_status
+from infrastructure.config import Config
+from infrastructure.logger import get_logger
+from infrastructure.quota_tracker import record_quota_usage, check_and_update_rate_limit, get_rate_limit_status
 
 logger = get_logger()
 

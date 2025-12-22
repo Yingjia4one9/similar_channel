@@ -7,8 +7,8 @@ import time
 from functools import wraps
 from typing import Any, Callable, Dict, Optional, TypeVar
 
-from logger import get_logger
-from config import Config
+from infrastructure.logger import get_logger
+from infrastructure.config import Config
 
 logger = get_logger()
 

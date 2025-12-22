@@ -35,10 +35,14 @@ ENV/
 # API Keys and sensitive files
 YouTube api key*.txt
 *api key*.txt
+**/YouTube api key*.txt
+**/*api key*.txt
 *.key
 *.pem
 .env
 .env.local
+data/*.txt
+data/*.db
 
 # Configuration files (may contain sensitive data)
 config.json

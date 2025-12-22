@@ -5,10 +5,10 @@
 import time
 from typing import Any, Dict, List
 
-from cache import cached_channel_info, cached_channel_videos
-from config import Config
-from logger import get_logger
-from youtube_api import YouTubeAPIError, YouTubeQuotaExceededError, yt_get
+from infrastructure.cache import cached_channel_info, cached_channel_videos
+from infrastructure.config import Config
+from infrastructure.logger import get_logger
+from core.youtube_api import YouTubeAPIError, YouTubeQuotaExceededError, yt_get
 
 logger = get_logger()
 

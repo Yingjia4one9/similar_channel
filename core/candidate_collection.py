@@ -4,9 +4,9 @@
 """
 from typing import List
 
-from config import Config
-from logger import get_logger
-from youtube_api import YouTubeAPIError, YouTubeQuotaExceededError, yt_get
+from infrastructure.config import Config
+from infrastructure.logger import get_logger
+from core.youtube_api import YouTubeAPIError, YouTubeQuotaExceededError, yt_get
 
 logger = get_logger()
 

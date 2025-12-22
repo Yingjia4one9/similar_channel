@@ -5,7 +5,7 @@
 import re
 from typing import Any, Dict, List, Optional
 
-from logger import get_logger
+from infrastructure.logger import get_logger
 
 logger = get_logger()
 

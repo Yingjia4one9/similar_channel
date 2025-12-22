@@ -7,7 +7,7 @@ from typing import Any, Dict
 
 import numpy as np
 
-from config import Config
+from infrastructure.config import Config
 
 
 def scale_score(base_subs: int, candidate_subs: int) -> float:

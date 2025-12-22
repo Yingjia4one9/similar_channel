@@ -10,8 +10,8 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 from threading import Lock
 
-from logger import get_logger
-from config import Config
+from infrastructure.logger import get_logger
+from infrastructure.config import Config
 
 logger = get_logger()
 

@@ -3,8 +3,8 @@
 清理添加 use_for 字段之前的旧记录（use_for IS NULL 的记录）
 """
 import sys
-from quota_tracker import clean_legacy_quota_records
-from logger import get_logger
+from infrastructure.quota_tracker import clean_legacy_quota_records
+from infrastructure.logger import get_logger
 
 logger = get_logger()
 

@@ -11,8 +11,8 @@ BD评分模块（交易所BD寻找KOL专用）
 import re
 from typing import Any, Dict, List, Tuple
 
-from config import Config
-from logger import get_logger
+from infrastructure.config import Config
+from infrastructure.logger import get_logger
 
 logger = get_logger()
 

@@ -10,13 +10,13 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from logger import get_logger
-from config import Config
+from infrastructure.logger import get_logger
+from infrastructure.config import Config
 
 logger = get_logger()
 
 # 配额跟踪数据库路径
-QUOTA_DB_PATH = os.path.join(os.path.dirname(__file__), "quota_tracker.db")
+QUOTA_DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "quota_tracker.db"))
 
 # YouTube API 配额消耗表（根据官方文档）
 # 注意：这些值可能随API版本更新而变化，需要定期检查
@@ -1093,4 +1093,130 @@ def get_quota_statistics(days: int = 7, daily_quota: int = DEFAULT_DAILY_QUOTA, 
             "by_endpoint": {},
             "by_day": {},
             "days": days,
+        }
+
+
+def predict_quota_exhaustion(lookback_hours: int = 1, daily_quota: int = DEFAULT_DAILY_QUOTA, use_for: Optional[str] = None) -> Dict:
+    """
+    预测配额耗尽时间（CP-y3-11：配额预测）
+    
+    Args:
+        lookback_hours: 用于计算使用速率的回看小时数（1-24）
+        daily_quota: 每日配额上限
+        use_for: API Key 用途标识（"index" 或 "search"），None 表示统计所有
+    
+    Returns:
+        包含以下字段的字典：
+        - current_usage_rate_per_hour: 当前使用速率（单位/小时）
+        - remaining_quota: 剩余配额
+        - predicted_exhaustion_time: 预测耗尽时间（ISO格式）
+        - predicted_exhaustion_hours: 预测耗尽时间（小时数）
+        - confidence: 预测置信度说明
+        - alert_level: 告警级别（none/low/medium/high/critical）
+        - alert_message: 告警消息
+    """
+    try:
+        # 获取当前配额使用情况
+        usage = get_quota_usage_today(daily_quota=daily_quota, use_for=use_for)
+        used_quota = usage.get("used_quota", 0)
+        remaining_quota = daily_quota - used_quota
+        
+        # 计算最近 lookback_hours 小时的使用速率
+        now = datetime.now(timezone.utc)
+        start_time = now - timedelta(hours=lookback_hours)
+        start_time_str = start_time.isoformat()
+        
+        with get_quota_db_connection() as conn:
+            cur = conn.cursor()
+            
+            if use_for is not None:
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(cost), 0) as total_cost
+                    FROM quota_usage
+                    WHERE timestamp >= ? AND use_for = ?
+                    """,
+                    (start_time_str, use_for),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(cost), 0) as total_cost
+                    FROM quota_usage
+                    WHERE timestamp >= ? AND (use_for IS NULL OR use_for = '')
+                    """,
+                    (start_time_str,),
+                )
+            row = cur.fetchone()
+            recent_usage = int(row[0]) if row else 0
+        
+        # 计算使用速率（单位/小时）
+        if lookback_hours > 0:
+            usage_rate_per_hour = recent_usage / lookback_hours
+        else:
+            usage_rate_per_hour = 0
+        
+        # 预测耗尽时间
+        if usage_rate_per_hour > 0:
+            predicted_hours = remaining_quota / usage_rate_per_hour
+            predicted_time = now + timedelta(hours=predicted_hours)
+            predicted_time_str = predicted_time.isoformat()
+        else:
+            predicted_hours = float('inf')
+            predicted_time_str = None
+        
+        # 确定告警级别
+        usage_rate = (used_quota / daily_quota * 100) if daily_quota > 0 else 0
+        
+        if usage_rate >= 95:
+            alert_level = "critical"
+            alert_message = f"配额使用率已达 {usage_rate:.1f}%，即将耗尽！"
+        elif usage_rate >= 80:
+            alert_level = "high"
+            alert_message = f"配额使用率已达 {usage_rate:.1f}%，请谨慎使用"
+        elif usage_rate >= 60:
+            alert_level = "medium"
+            alert_message = f"配额使用率为 {usage_rate:.1f}%"
+        elif usage_rate >= 40:
+            alert_level = "low"
+            alert_message = f"配额使用率为 {usage_rate:.1f}%"
+        else:
+            alert_level = "none"
+            alert_message = "配额使用正常"
+        
+        # 置信度说明
+        if lookback_hours >= 6:
+            confidence = "高（基于6小时以上数据）"
+        elif lookback_hours >= 3:
+            confidence = "中（基于3-6小时数据）"
+        else:
+            confidence = "低（基于少于3小时数据，可能不够准确）"
+        
+        return {
+            "current_usage_rate_per_hour": round(usage_rate_per_hour, 2),
+            "remaining_quota": remaining_quota,
+            "predicted_exhaustion_time": predicted_time_str,
+            "predicted_exhaustion_hours": round(predicted_hours, 2) if predicted_hours != float('inf') else None,
+            "confidence": confidence,
+            "alert_level": alert_level,
+            "alert_message": alert_message,
+            "lookback_hours": lookback_hours,
+            "used_quota": used_quota,
+            "daily_quota": daily_quota,
+            "usage_rate": round(usage_rate, 2),
+        }
+    except Exception as e:
+        logger.warning(f"预测配额耗尽时间失败: {e}")
+        return {
+            "current_usage_rate_per_hour": 0,
+            "remaining_quota": daily_quota,
+            "predicted_exhaustion_time": None,
+            "predicted_exhaustion_hours": None,
+            "confidence": "无法计算",
+            "alert_level": "none",
+            "alert_message": f"预测失败: {str(e)}",
+            "lookback_hours": lookback_hours,
+            "used_quota": 0,
+            "daily_quota": daily_quota,
+            "usage_rate": 0,
         }

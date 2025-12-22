@@ -13,7 +13,7 @@ from typing import Any, Dict, Generator, List
 
 import numpy as np
 
-from logger import get_logger
+from infrastructure.logger import get_logger
 
 logger = get_logger()
 
@@ -24,7 +24,7 @@ except ImportError:
     FAISS_AVAILABLE = False
     logger.warning("FAISS不可用，将使用numpy进行向量搜索")
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "channel_index.db")
+DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "channel_index.db"))
 FAISS_INDEX_PATH = os.path.join(os.path.dirname(__file__), ".faiss_index.pkl")
 
 # 全局索引缓存

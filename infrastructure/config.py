@@ -393,13 +393,17 @@ class Config:
             return cls._config_cache
         
         config_file = os.getenv(cls.CONFIG_FILE_ENV_VAR, cls.DEFAULT_CONFIG_FILE)
-        config_path = Path(config_file)
+        # 如果配置文件路径不是绝对路径，则从 config 文件夹查找
+        if not os.path.isabs(config_file):
+            config_path = Path(os.path.dirname(__file__)) / ".." / "config" / config_file
+        else:
+            config_path = Path(config_file)
         
         # 如果配置文件不存在，返回空字典
         if not config_path.exists():
             logger = cls._get_logger()
             # 脱敏文件路径（CP-y5-11：敏感数据脱敏）
-            from utils import sanitize_file_path
+            from infrastructure.utils import sanitize_file_path
             safe_path = sanitize_file_path(str(config_path))
             logger.debug(f"配置文件不存在: {safe_path}，使用默认配置")
             cls._config_cache = {}
@@ -427,14 +431,14 @@ class Config:
             return cls._config_cache
         except json.JSONDecodeError as e:
             logger = cls._get_logger()
-            from utils import sanitize_file_path
+            from infrastructure.utils import sanitize_file_path
             safe_path = sanitize_file_path(str(config_path))
             logger.warning(f"配置文件格式错误: {e}（路径: {safe_path}），使用默认配置")
             cls._config_cache = {}
             return cls._config_cache
         except Exception as e:
             logger = cls._get_logger()
-            from utils import sanitize_file_path
+            from infrastructure.utils import sanitize_file_path
             safe_path = sanitize_file_path(str(config_path))
             logger.warning(f"加载配置文件失败: {type(e).__name__}（路径: {safe_path}），使用默认配置")
             cls._config_cache = {}
@@ -492,7 +496,7 @@ class Config:
     @classmethod
     def _get_logger(cls):
         """延迟导入logger，避免循环依赖"""
-        from logger import get_logger
+        from infrastructure.logger import get_logger
         return get_logger()
     
     @classmethod
@@ -563,8 +567,8 @@ class Config:
                 logger.warning("API Key长度异常，可能无效")
             return key.strip()
         
-        # 从文件中读取
-        key_path = os.path.join(os.path.dirname(__file__), file_name)
+        # 从文件中读取（从 data 文件夹读取）
+        key_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", file_name))
         if os.path.exists(key_path):
             try:
                 with open(key_path, "r", encoding="utf-8") as f:
@@ -575,7 +579,7 @@ class Config:
                         logger.warning("API Key长度异常，可能无效")
                     return key
             except OSError as e:
-                from utils import sanitize_file_path
+                from infrastructure.utils import sanitize_file_path
                 safe_path = sanitize_file_path(str(key_path))
                 logger.debug(f"读取{purpose}API Key文件失败: {e} (路径: {safe_path})")
             except Exception as e:

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from threading import Lock
 from typing import Dict, List, Optional
 
-from logger import get_logger
+from infrastructure.logger import get_logger
 
 logger = get_logger()
 

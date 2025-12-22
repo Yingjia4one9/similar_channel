@@ -5,8 +5,8 @@
 import re
 from urllib.parse import parse_qs, urlparse
 
-from logger import get_logger
-from youtube_api import yt_get
+from infrastructure.logger import get_logger
+from core.youtube_api import yt_get
 
 logger = get_logger()
 

@@ -9,21 +9,21 @@ from typing import Iterable, List, Tuple, Optional, Dict, Any
 
 import numpy as np
 
-from candidate_collection import search_candidate_channels_by_title
-from cache import invalidate_all_channel_caches
-from channel_info import (
+from core.candidate_collection import search_candidate_channels_by_title
+from infrastructure.cache import invalidate_all_channel_caches
+from core.channel_info import (
     get_channel_basic_info,
     get_recent_video_snippets_for_channel,
 )
-from channel_parser import extract_channel_id_from_url
-from config import Config
-from embedding import (
+from core.channel_parser import extract_channel_id_from_url
+from infrastructure.config import Config
+from core.embedding import (
     get_embed_model,
     infer_topics_and_audience,
 )
-from logger import get_logger
-from utils import build_text_for_channel, extract_emails_from_text
-from youtube_api import YouTubeQuotaExceededError, yt_get
+from infrastructure.logger import get_logger
+from infrastructure.utils import build_text_for_channel, extract_emails_from_text
+from core.youtube_api import YouTubeQuotaExceededError, yt_get
 
 logger = get_logger()
 

@@ -7,7 +7,7 @@ from typing import Dict, List, Union
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-from config import Config
+from infrastructure.config import Config
 
 
 # 全局模型实例（延迟加载）

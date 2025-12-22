@@ -3,7 +3,7 @@
 提供统一的错误处理函数和异常类
 """
 from typing import Any, Optional
-from logger import get_logger
+from infrastructure.logger import get_logger
 
 logger = get_logger()
 

@@ -8,43 +8,43 @@ from typing import Any, Callable, Dict, List, Tuple
 
 import numpy as np
 
-from cache import invalidate_all_channel_caches
-from candidate_collection import (
+from infrastructure.cache import invalidate_all_channel_caches
+from core.candidate_collection import (
     collect_candidate_channels_from_related_videos,
     search_candidate_channels_by_title,
 )
-from channel_info import (
+from core.channel_info import (
     batch_get_channels_info,
     get_channel_basic_info,
     get_recent_video_ids,
     get_recent_video_snippets_for_channel,
     get_recent_videos_stats,
 )
-from channel_parser import extract_channel_id_from_url
-from config import Config
-from database import (
+from core.channel_parser import extract_channel_id_from_url
+from infrastructure.config import Config
+from infrastructure.database import (
     get_candidates_from_local_index,
     get_channel_basic_info_for_filtering,
     get_channel_info_from_local_db,
     get_embeddings_from_local_db,
     get_single_channel_info_from_local_db,
 )
-from embedding import (
+from core.embedding import (
     cosine_similarity,
     ensure_label_embeddings,
     get_embed_model,
     infer_topics_and_audience,
 )
-from similarity import (
+from core.similarity import (
     calculate_tag_overlap,
     calculate_total_score,
     scale_score,
 )
-from logger import get_logger
-from utils import build_text_for_channel, extract_emails_from_text
-from youtube_api import YouTubeQuotaExceededError
-from quota_tracker import record_fallback_usage
-from bd_scoring import calculate_full_bd_metrics
+from infrastructure.logger import get_logger
+from infrastructure.utils import build_text_for_channel, extract_emails_from_text
+from core.youtube_api import YouTubeQuotaExceededError
+from infrastructure.quota_tracker import record_fallback_usage
+from core.bd_scoring import calculate_full_bd_metrics
 
 # 导入数据库保存函数（延迟导入，避免循环依赖）
 try:
