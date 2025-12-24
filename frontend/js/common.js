@@ -31,6 +31,14 @@
     getThumbnailUrl: function(thumbnails) {
       if (!thumbnails) return "";
       return thumbnails.medium?.url || thumbnails.default?.url || "";
+    },
+
+    // CP-y5-07：XSS防护 - HTML转义函数
+    escapeHtml: function(text) {
+      if (!text) return "";
+      const div = document.createElement("div");
+      div.textContent = text;
+      return div.innerHTML;
     }
   };
 
@@ -40,7 +48,8 @@
       if (!tags || tags.length === 0) {
         return `<span class='tag tag-${type}'>-</span>`;
       }
-      return tags.map(t => `<span class="tag tag-${type}">${t}</span>`).join("");
+      // CP-y5-07：XSS防护 - 转义标签内容
+      return tags.map(t => `<span class="tag tag-${type}">${Utils.escapeHtml(t)}</span>`).join("");
     },
 
     renderVideoThumbnails: function(videos) {
@@ -51,9 +60,11 @@
         const videoUrl = video.videoId 
           ? `https://www.youtube.com/watch?v=${video.videoId}` 
           : "#";
+        // CP-y5-07：XSS防护 - 转义视频标题
+        const safeTitle = Utils.escapeHtml(video.title || "");
         return `
-          <a href="${videoUrl}" target="_blank" class="video-thumbnail" title="${video.title || ""}">
-            ${thumbnailUrl ? `<img src="${thumbnailUrl}" alt="${video.title || ""}" />` : ""}
+          <a href="${videoUrl}" target="_blank" class="video-thumbnail" title="${safeTitle}">
+            ${thumbnailUrl ? `<img src="${thumbnailUrl}" alt="${safeTitle}" />` : ""}
           </a>
         `;
       }).join("");
@@ -77,12 +88,12 @@
             </div>
             <div class="channel-info">
               <div class="channel-name">
-                <a href="${url}" target="_blank">${ch.title}</a>
+                <a href="${url}" target="_blank">${Utils.escapeHtml(ch.title || "")}</a>
               </div>
               <div class="channel-handle">@${ch.channelId.substring(0, 12)}...</div>
               <div class="channel-meta">
                 ${country ? `<span class="country-flag">${Utils.getCountryFlag(country)}</span>` : ""}
-                <span>${country}</span>
+                <span>${Utils.escapeHtml(country || "")}</span>
               </div>
             </div>
           </div>
@@ -154,7 +165,7 @@
           ${emails.length > 0 ? `
             <div class="emails">
               <strong>Emails:</strong>
-              <div class="emails-list">${emails.join(", ")}</div>
+              <div class="emails-list">${emails.map(e => Utils.escapeHtml(e)).join(", ")}</div>
             </div>
           ` : ""}
         </div>

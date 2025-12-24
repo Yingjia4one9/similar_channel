@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -213,19 +214,103 @@ def record_quota_usage(
                 conn.commit()
         
         # 定期检查配额告警和限流状态（每N次记录后检查一次，避免频繁检查）
+        # 修复：使用原子操作避免竞态条件
         global _quota_record_count
+        should_check = False
         with _quota_record_count_lock:
             _quota_record_count += 1
             if _quota_record_count >= _ALERT_CHECK_INTERVAL:
                 _quota_record_count = 0
-                # 异步检查告警和限流（不阻塞主流程）
+                should_check = True
+        
+        # 在锁外进行检查，但使用原子操作确保不会重复检查
+        if should_check:
+            log_path = r"c:\Users\A\Desktop\yt-similar-backend\.cursor\debug.log"
+            
+            # #region agent log
+            try:
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({
+                        "timestamp": int(time.time() * 1000),
+                        "location": "quota_tracker.py:record_quota_usage",
+                        "message": "开始检查配额告警和限流（修复异步检查竞态）",
+                        "data": {"endpoint": endpoint, "use_for": use_for},
+                        "sessionId": "debug-session",
+                        "runId": "fix-verification",
+                        "hypothesisId": "D"
+                    }, ensure_ascii=False) + "\n")
+            except: pass
+            # #endregion
+            
+            try:
+                # 检查所有用途的配额告警和限流
+                # 优化：避免在锁内执行数据库操作，防止阻塞
+                for usage_type in [None, "index", "search"]:
+                    # 先快速获取使用率（在锁外，避免阻塞）
+                    usage_rate = get_quota_usage_rate(daily_quota=DEFAULT_DAILY_QUOTA, use_for=usage_type)
+                    # 快速检查限流状态（使用已获取的使用率，避免在锁内查询数据库）
+                    with _rate_limit_lock:
+                        # 使用已获取的使用率，避免在锁内查询数据库
+                        use_for_key = usage_type if usage_type is not None else "default"
+                        usage_rate_decimal = usage_rate / 100.0
+                        threshold = Config.QUOTA_RATE_LIMIT.get("threshold", 0.8)
+                        strict_threshold = Config.QUOTA_RATE_LIMIT.get("strict_threshold", 0.95)
+                        reduction_rate = Config.QUOTA_RATE_LIMIT.get("reduction_rate", 0.5)
+                        min_delay = Config.QUOTA_RATE_LIMIT.get("min_delay_seconds", 0.1)
+                        max_delay = Config.QUOTA_RATE_LIMIT.get("max_delay_seconds", 5.0)
+                        
+                        if use_for_key not in _rate_limit_status:
+                            _rate_limit_status[use_for_key] = {"enabled": False, "delay": 0.0}
+                        
+                        if usage_rate_decimal >= strict_threshold:
+                            _rate_limit_status[use_for_key]["enabled"] = True
+                            _rate_limit_status[use_for_key]["delay"] = max_delay
+                        elif usage_rate_decimal >= threshold:
+                            _rate_limit_status[use_for_key]["enabled"] = True
+                            excess_rate = (usage_rate_decimal - threshold) / (strict_threshold - threshold)
+                            base_delay = min_delay * (1 / reduction_rate)
+                            calculated_delay = base_delay * (1 + excess_rate * (max_delay / base_delay - 1))
+                            delay = min(max(calculated_delay, min_delay), max_delay)
+                            _rate_limit_status[use_for_key]["delay"] = delay
+                        else:
+                            if _rate_limit_status[use_for_key]["enabled"]:
+                                pass  # 取消限流的日志已在原函数中
+                            _rate_limit_status[use_for_key]["enabled"] = False
+                            _rate_limit_status[use_for_key]["delay"] = 0.0
+                    
+                    # 告警检查涉及数据库操作，在锁外执行，避免阻塞
+                    check_and_record_quota_warning(daily_quota=DEFAULT_DAILY_QUOTA, use_for=usage_type)
+                
+                # #region agent log
                 try:
-                    # 检查所有用途的配额告警和限流
-                    for usage_type in [None, "index", "search"]:
-                        check_and_record_quota_warning(daily_quota=DEFAULT_DAILY_QUOTA, use_for=usage_type)
-                        check_and_update_rate_limit(daily_quota=DEFAULT_DAILY_QUOTA, use_for=usage_type)
-                except Exception as e:
-                    logger.debug(f"检查配额告警和限流时出错: {e}")
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            "timestamp": int(time.time() * 1000),
+                            "location": "quota_tracker.py:record_quota_usage",
+                            "message": "配额告警和限流检查完成",
+                            "data": {"endpoint": endpoint, "use_for": use_for},
+                            "sessionId": "debug-session",
+                            "runId": "fix-verification",
+                            "hypothesisId": "D"
+                        }, ensure_ascii=False) + "\n")
+                except: pass
+                # #endregion
+            except Exception as e:
+                logger.debug(f"检查配额告警和限流时出错: {e}")
+                # #region agent log
+                try:
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            "timestamp": int(time.time() * 1000),
+                            "location": "quota_tracker.py:record_quota_usage",
+                            "message": "配额告警和限流检查出错",
+                            "data": {"error": str(e), "endpoint": endpoint, "use_for": use_for},
+                            "sessionId": "debug-session",
+                            "runId": "fix-verification",
+                            "hypothesisId": "D"
+                        }, ensure_ascii=False) + "\n")
+                except: pass
+                # #endregion
     except Exception as e:
         logger.warning(f"记录配额使用失败: {e}")
 

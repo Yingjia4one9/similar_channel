@@ -262,7 +262,7 @@ def _evict_expired_items() -> int:
 
 def _evict_oldest_items(count: int) -> int:
     """
-    清理最旧的缓存项（LRU策略，内部函数）
+    清理最旧的缓存项（LRU策略，内部函数，修复排序未加锁问题）
     
     Args:
         count: 要清理的数量
@@ -270,20 +270,57 @@ def _evict_oldest_items(count: int) -> int:
     Returns:
         实际清理的数量
     """
-    if count <= 0 or len(_result_cache) == 0:
+    log_path = r"c:\Users\A\Desktop\yt-similar-backend\.cursor\debug.log"
+    
+    if count <= 0:
         return 0
     
-    # 按最后访问时间排序，选择最旧的项
-    sorted_items = sorted(
-        _result_cache.items(),
-        key=lambda x: x[1].get("last_accessed", x[1].get("created_at", datetime.min))
-    )
+    # #region agent log
+    try:
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({
+                "timestamp": int(time.time() * 1000),
+                "location": "result_cache.py:_evict_oldest_items",
+                "message": "开始LRU淘汰（修复排序未加锁）",
+                "data": {"requested_count": count, "cache_size": len(_result_cache)},
+                "sessionId": "debug-session",
+                "runId": "fix-verification",
+                "hypothesisId": "C"
+            }, ensure_ascii=False) + "\n")
+    except: pass
+    # #endregion
     
-    evicted = 0
-    for result_id, _ in sorted_items[:count]:
-        if result_id in _result_cache:
-            del _result_cache[result_id]
-            evicted += 1
+    # 在锁内完成排序和删除，避免竞态条件
+    with _cache_lock:
+        if len(_result_cache) == 0:
+            return 0
+        
+        # 按最后访问时间排序，选择最旧的项（在锁内完成）
+        sorted_items = sorted(
+            _result_cache.items(),
+            key=lambda x: x[1].get("last_accessed", x[1].get("created_at", datetime.min))
+        )
+        
+        evicted = 0
+        for result_id, _ in sorted_items[:count]:
+            if result_id in _result_cache:
+                del _result_cache[result_id]
+                evicted += 1
+    
+    # #region agent log
+    try:
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({
+                "timestamp": int(time.time() * 1000),
+                "location": "result_cache.py:_evict_oldest_items",
+                "message": "LRU淘汰完成",
+                "data": {"requested_count": count, "evicted_count": evicted, "remaining_size": len(_result_cache)},
+                "sessionId": "debug-session",
+                "runId": "fix-verification",
+                "hypothesisId": "C"
+            }, ensure_ascii=False) + "\n")
+    except: pass
+    # #endregion
     
     return evicted
 

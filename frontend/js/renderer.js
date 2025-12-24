@@ -2,7 +2,7 @@
  * 渲染模块
  * 处理频道卡片、标签、指标等的渲染
  */
-import { formatNumber, getInitials, getCountryFlag, getThumbnailUrl } from "./utils.js";
+import { formatNumber, getInitials, getCountryFlag, getThumbnailUrl, escapeHtml } from "./utils.js";
 
 /**
  * 渲染标签列表
@@ -14,8 +14,9 @@ function renderTags(tags, type) {
   if (!tags || tags.length === 0) {
     return `<span class='tag tag-${type}'>-</span>`;
   }
+  // CP-y5-07：XSS防护 - 转义标签内容
   return tags
-    .map(t => `<span class="tag tag-${type}">${t}</span>`)
+    .map(t => `<span class="tag tag-${type}">${escapeHtml(t)}</span>`)
     .join("");
 }
 
@@ -33,9 +34,11 @@ function renderVideoThumbnails(videos) {
       const videoUrl = video.videoId 
         ? `https://www.youtube.com/watch?v=${video.videoId}` 
         : "#";
+      // CP-y5-07：XSS防护 - 转义视频标题
+      const safeTitle = escapeHtml(video.title || "");
       return `
-        <a href="${videoUrl}" target="_blank" class="video-thumbnail" title="${video.title || ""}">
-          ${thumbnailUrl ? `<img src="${thumbnailUrl}" alt="${video.title || ""}" />` : ""}
+        <a href="${videoUrl}" target="_blank" class="video-thumbnail" title="${safeTitle}">
+          ${thumbnailUrl ? `<img src="${thumbnailUrl}" alt="${safeTitle}" />` : ""}
         </a>
       `;
     })
@@ -65,12 +68,12 @@ export function renderChannelCard(ch) {
         </div>
         <div class="channel-info">
           <div class="channel-name">
-            <a href="${url}" target="_blank">${ch.title}</a>
+            <a href="${url}" target="_blank">${escapeHtml(ch.title || "")}</a>
           </div>
           <div class="channel-handle">@${ch.channelId.substring(0, 12)}...</div>
           <div class="channel-meta">
             ${country ? `<span class="country-flag">${getCountryFlag(country)}</span>` : ""}
-            <span>${country}</span>
+            <span>${escapeHtml(country || "")}</span>
           </div>
         </div>
       </div>
@@ -142,7 +145,7 @@ export function renderChannelCard(ch) {
       ${emails.length > 0 ? `
         <div class="emails">
           <strong>Emails:</strong>
-          <div class="emails-list">${emails.join(", ")}</div>
+          <div class="emails-list">${emails.map(e => escapeHtml(e)).join(", ")}</div>
         </div>
       ` : ""}
     </div>

@@ -528,7 +528,11 @@ def calculate_full_bd_metrics(
     subscriber_count = channel_info.get("subscriberCount", 0)
     
     # 1. 竞品检测
-    competitor_result = detect_competitor_collaborations(description, recent_videos)
+    # 优化：优先使用数据库中的竞品检测结果，避免重复检测（减少计算）
+    competitor_result = channel_info.get("competitor_detection")
+    if not competitor_result or not isinstance(competitor_result, dict):
+        # 数据库中没有结果，需要重新检测
+        competitor_result = detect_competitor_collaborations(description, recent_videos)
     
     # 2. 合约聚焦度
     contract_focus = calculate_contract_focus_score(topics, description, recent_videos)

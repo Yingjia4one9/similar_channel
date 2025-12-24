@@ -7,8 +7,10 @@ import os
 import pickle
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from queue import Queue, Empty
 from typing import Any, Dict, Generator, List
 
 import numpy as np
@@ -37,11 +39,83 @@ _update_queue: List[str] = []
 _update_queue_lock = threading.Lock()
 _updating = False
 
+# 数据库连接池（线程安全）
+_connection_pool: Queue[sqlite3.Connection] = Queue(maxsize=10)
+_pool_lock = threading.Lock()
+_pool_initialized = False
+_MAX_POOL_SIZE = 10
+_POOL_TIMEOUT = 5.0  # 连接池获取连接的超时时间（秒）
+
+
+def _init_connection_pool() -> None:
+    """初始化数据库连接池（线程安全，修复竞态条件）"""
+    global _pool_initialized
+    
+    # 双重检查锁定模式，避免重复初始化
+    if _pool_initialized:
+        return
+    
+    with _pool_lock:
+        # 再次检查，防止在获取锁的过程中其他线程已经初始化
+        if _pool_initialized:
+            return
+        
+        from infrastructure.config import Config
+        db_timeout = Config.get_config_value("DB_TIMEOUT", Config.DB_TIMEOUT, "YT_DB_TIMEOUT")
+        
+        # 确保数据库文件存在并初始化WAL模式（提高并发性能）
+        try:
+            # 创建初始连接以设置WAL模式（添加超时和错误处理）
+            logger.debug(f"开始初始化数据库连接池，数据库路径: {DB_PATH}")
+            init_conn = sqlite3.connect(DB_PATH, timeout=db_timeout)
+            init_conn.execute("PRAGMA journal_mode=WAL")  # 启用WAL模式，提高并发性能
+            init_conn.execute("PRAGMA synchronous=NORMAL")  # 平衡性能和安全性
+            init_conn.execute("PRAGMA foreign_keys=ON")  # 启用外键约束
+            init_conn.close()
+            logger.debug("WAL模式设置完成")
+            
+            # 创建连接池（添加进度日志）
+            pool_size = min(5, _MAX_POOL_SIZE)
+            logger.debug(f"开始创建 {pool_size} 个连接...")
+            for i in range(pool_size):
+                try:
+                    conn = sqlite3.connect(DB_PATH, timeout=db_timeout)
+                    conn.row_factory = sqlite3.Row
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    conn.execute("PRAGMA synchronous=NORMAL")
+                    conn.execute("PRAGMA foreign_keys=ON")
+                    _connection_pool.put(conn)
+                    logger.debug(f"连接 {i+1}/{pool_size} 已创建并添加到池")
+                except Exception as conn_err:
+                    logger.warning(f"创建连接池连接 {i+1} 失败: {conn_err}")
+                    # 继续创建其他连接，不中断
+            
+            _pool_initialized = True
+            final_size = _connection_pool.qsize()
+            logger.info(f"数据库连接池初始化完成（初始大小: {final_size}/{pool_size}）")
+            if final_size == 0:
+                logger.warning("连接池为空，将使用动态创建连接模式")
+        except Exception as e:
+            logger.error(f"初始化连接池失败，将使用单连接模式: {e}", exc_info=True)
+            _pool_initialized = True  # 标记为已初始化，避免重复尝试
+
+
+def _create_new_connection() -> sqlite3.Connection:
+    """创建新的数据库连接"""
+    from infrastructure.config import Config
+    db_timeout = Config.get_config_value("DB_TIMEOUT", Config.DB_TIMEOUT, "YT_DB_TIMEOUT")
+    conn = sqlite3.connect(DB_PATH, timeout=db_timeout)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
 
 @contextmanager
 def get_db_connection() -> Generator[sqlite3.Connection, None, None]:
     """
-    数据库连接的 context manager，确保连接正确关闭。
+    数据库连接的 context manager，使用连接池提高性能（线程安全）。
     自动处理事务提交和回滚。
     
     Usage:
@@ -55,30 +129,154 @@ def get_db_connection() -> Generator[sqlite3.Connection, None, None]:
         sqlite3.DatabaseError: 其他数据库错误
         OSError: 文件系统错误（如数据库文件无法访问）
     """
-    # 从配置获取数据库超时时间（支持环境变量覆盖）
-    from config import Config
-    db_timeout = Config.get_config_value("DB_TIMEOUT", Config.DB_TIMEOUT, "YT_DB_TIMEOUT")
+    # 初始化连接池（如果尚未初始化，添加日志以便调试）
+    if not _pool_initialized:
+        logger.debug("初始化数据库连接池...")
+        _init_connection_pool()
+        logger.debug(f"连接池初始化完成，当前大小: {_connection_pool.qsize()}")
     
     conn = None
+    from_pool = False
+    log_path = r"c:\Users\A\Desktop\yt-similar-backend\.cursor\debug.log"
+    
     try:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=db_timeout)
-        conn.row_factory = sqlite3.Row  # 使用 Row 工厂，便于访问列
+        # 尝试从连接池获取连接
+        try:
+            conn = _connection_pool.get(timeout=_POOL_TIMEOUT)
+            from_pool = True
+            # #region agent log
+            try:
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({
+                        "timestamp": int(time.time() * 1000),
+                        "location": "database.py:get_db_connection",
+                        "message": "从连接池获取连接",
+                        "data": {"pool_size": _connection_pool.qsize(), "from_pool": True},
+                        "sessionId": "debug-session",
+                        "runId": "fix-verification",
+                        "hypothesisId": "A"
+                    }, ensure_ascii=False) + "\n")
+            except: pass
+            # #endregion
+        except Empty:
+            # 连接池为空，创建新连接
+            conn = _create_new_connection()
+            # #region agent log
+            try:
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({
+                        "timestamp": int(time.time() * 1000),
+                        "location": "database.py:get_db_connection",
+                        "message": "连接池为空，创建新连接",
+                        "data": {"pool_size": _connection_pool.qsize(), "from_pool": False},
+                        "sessionId": "debug-session",
+                        "runId": "fix-verification",
+                        "hypothesisId": "A"
+                    }, ensure_ascii=False) + "\n")
+            except: pass
+            # #endregion
+        
+        # 检查连接是否有效（使用更宽松的检查，避免WAL模式下的误判）
+        try:
+            # 在WAL模式下，连接可能处于中间状态，使用更简单的检查
+            conn.execute("PRAGMA quick_check").fetchone()
+        except (sqlite3.ProgrammingError, sqlite3.OperationalError, AttributeError):
+            # 连接已关闭或无效，创建新连接
+            if from_pool:
+                try:
+                    conn.close()
+                except: pass
+            conn = _create_new_connection()
+            from_pool = False
+            # #region agent log
+            try:
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({
+                        "timestamp": int(time.time() * 1000),
+                        "location": "database.py:get_db_connection",
+                        "message": "连接无效，创建新连接",
+                        "data": {"pool_size": _connection_pool.qsize()},
+                        "sessionId": "debug-session",
+                        "runId": "fix-verification",
+                        "hypothesisId": "A"
+                    }, ensure_ascii=False) + "\n")
+            except: pass
+            # #endregion
+        
         yield conn
         conn.commit()
+        
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    "timestamp": int(time.time() * 1000),
+                    "location": "database.py:get_db_connection",
+                    "message": "数据库操作成功提交",
+                    "data": {"pool_size": _connection_pool.qsize()},
+                    "sessionId": "debug-session",
+                    "runId": "fix-verification",
+                    "hypothesisId": "A"
+                }, ensure_ascii=False) + "\n")
+        except: pass
+        # #endregion
+        
     except sqlite3.OperationalError as e:
         if conn:
             conn.rollback()
         logger.error(f"数据库操作错误（操作失败）: {e}", exc_info=True)
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    "timestamp": int(time.time() * 1000),
+                    "location": "database.py:get_db_connection",
+                    "message": "数据库操作错误",
+                    "data": {"error": str(e), "error_type": "OperationalError"},
+                    "sessionId": "debug-session",
+                    "runId": "fix-verification",
+                    "hypothesisId": "A"
+                }, ensure_ascii=False) + "\n")
+        except: pass
+        # #endregion
         raise
     except sqlite3.IntegrityError as e:
         if conn:
             conn.rollback()
         logger.error(f"数据库完整性错误（数据冲突）: {e}", exc_info=True)
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    "timestamp": int(time.time() * 1000),
+                    "location": "database.py:get_db_connection",
+                    "message": "数据库完整性错误",
+                    "data": {"error": str(e), "error_type": "IntegrityError"},
+                    "sessionId": "debug-session",
+                    "runId": "fix-verification",
+                    "hypothesisId": "A"
+                }, ensure_ascii=False) + "\n")
+        except: pass
+        # #endregion
         raise
     except sqlite3.DatabaseError as e:
         if conn:
             conn.rollback()
         logger.error(f"数据库错误: {e}", exc_info=True)
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    "timestamp": int(time.time() * 1000),
+                    "location": "database.py:get_db_connection",
+                    "message": "数据库错误",
+                    "data": {"error": str(e), "error_type": "DatabaseError"},
+                    "sessionId": "debug-session",
+                    "runId": "fix-verification",
+                    "hypothesisId": "A"
+                }, ensure_ascii=False) + "\n")
+        except: pass
+        # #endregion
         raise
     except OSError as e:
         if conn:
@@ -93,9 +291,79 @@ def get_db_connection() -> Generator[sqlite3.Connection, None, None]:
     finally:
         if conn:
             try:
-                conn.close()
+                # 如果连接来自池且池未满，则归还连接；否则关闭连接
+                if from_pool and _connection_pool.qsize() < _MAX_POOL_SIZE:
+                    # 检查连接是否仍然有效（使用更简单的方式，避免阻塞）
+                    try:
+                        # 归还连接前，确保连接处于干净状态
+                        conn.rollback()  # 回滚任何未提交的事务
+                        # 使用put_nowait避免阻塞，如果队列满则关闭连接
+                        try:
+                            _connection_pool.put_nowait(conn)
+                            # #region agent log
+                            try:
+                                with open(log_path, 'a', encoding='utf-8') as f:
+                                    f.write(json.dumps({
+                                        "timestamp": int(time.time() * 1000),
+                                        "location": "database.py:get_db_connection:finally",
+                                        "message": "连接已归还到池",
+                                        "data": {"pool_size": _connection_pool.qsize()},
+                                        "sessionId": "debug-session",
+                                        "runId": "fix-verification",
+                                        "hypothesisId": "A"
+                                    }, ensure_ascii=False) + "\n")
+                            except: pass
+                            # #endregion
+                        except Exception:
+                            # 队列已满，关闭连接
+                            try:
+                                conn.close()
+                            except: pass
+                    except Exception as check_err:
+                        # 连接已无效，关闭它
+                        try:
+                            conn.close()
+                        except: pass
+                        # #region agent log
+                        try:
+                            with open(log_path, 'a', encoding='utf-8') as f:
+                                f.write(json.dumps({
+                                    "timestamp": int(time.time() * 1000),
+                                    "location": "database.py:get_db_connection:finally",
+                                    "message": "连接无效，已关闭",
+                                    "data": {"error": str(check_err), "pool_size": _connection_pool.qsize()},
+                                    "sessionId": "debug-session",
+                                    "runId": "fix-verification",
+                                    "hypothesisId": "A"
+                                }, ensure_ascii=False) + "\n")
+                        except: pass
+                        # #endregion
+                else:
+                    # 新创建的连接或池已满，直接关闭
+                    if not from_pool:
+                        try:
+                            conn.close()
+                        except: pass
+                    elif _connection_pool.qsize() >= _MAX_POOL_SIZE:
+                        try:
+                            conn.close()
+                        except: pass
             except Exception as e:
-                logger.warning(f"关闭数据库连接时出错: {e}")
+                logger.warning(f"归还/关闭数据库连接时出错: {e}")
+                # #region agent log
+                try:
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            "timestamp": int(time.time() * 1000),
+                            "location": "database.py:get_db_connection:finally",
+                            "message": "归还连接时出错",
+                            "data": {"error": str(e), "from_pool": from_pool, "pool_size": _connection_pool.qsize()},
+                            "sessionId": "debug-session",
+                            "runId": "fix-verification",
+                            "hypothesisId": "A"
+                        }, ensure_ascii=False) + "\n")
+                except: pass
+                # #endregion
 
 
 def ensure_schema() -> None:
@@ -124,10 +392,35 @@ def ensure_schema() -> None:
                     emails TEXT,
                     topics TEXT,
                     audience TEXT,
+                    recent_videos TEXT,
+                    engagement_rate REAL DEFAULT 0.0 CHECK(engagement_rate >= 0.0),
+                    view_rate REAL DEFAULT 0.0 CHECK(view_rate >= 0.0),
+                    competitor_detection TEXT,
                     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+            
+            # 为现有数据库添加新字段（向后兼容）
+            # 检查字段是否存在，如果不存在则添加
+            cur.execute("PRAGMA table_info(channels)")
+            existing_columns = [row[1] for row in cur.fetchall()]
+            
+            if "recent_videos" not in existing_columns:
+                cur.execute("ALTER TABLE channels ADD COLUMN recent_videos TEXT")
+                logger.debug("已添加 recent_videos 字段到 channels 表")
+            
+            if "engagement_rate" not in existing_columns:
+                cur.execute("ALTER TABLE channels ADD COLUMN engagement_rate REAL DEFAULT 0.0 CHECK(engagement_rate >= 0.0)")
+                logger.debug("已添加 engagement_rate 字段到 channels 表")
+            
+            if "view_rate" not in existing_columns:
+                cur.execute("ALTER TABLE channels ADD COLUMN view_rate REAL DEFAULT 0.0 CHECK(view_rate >= 0.0)")
+                logger.debug("已添加 view_rate 字段到 channels 表")
+            
+            if "competitor_detection" not in existing_columns:
+                cur.execute("ALTER TABLE channels ADD COLUMN competitor_detection TEXT")
+                logger.debug("已添加 competitor_detection 字段到 channels 表")
             
             # 创建 channel_embeddings 表（带完整性约束）
             cur.execute(
@@ -280,7 +573,7 @@ def _build_faiss_index() -> tuple[Any, List[str]]:
             with open(FAISS_INDEX_PATH, 'wb') as f:
                 pickle.dump({'index': index, 'ids': ids}, f)
             # 脱敏文件路径（CP-y5-11：敏感数据脱敏）
-            from utils import sanitize_file_path
+            from infrastructure.utils import sanitize_file_path
             safe_path = sanitize_file_path(FAISS_INDEX_PATH)
             logger.debug(f"FAISS索引已保存到文件: {safe_path}")
         except PermissionError as e:
@@ -385,7 +678,7 @@ def get_candidates_from_local_index(
 
 def get_channel_info_from_local_db(
     channel_ids: List[str], 
-    max_age_days: int = 7,
+    max_age_days: int = 60,
     auto_update_expired: bool = False
 ) -> List[Dict[str, Any]]:
     """
@@ -412,7 +705,7 @@ def get_channel_info_from_local_db(
     
     # 优化：分批查询，避免IN子句过长（SQLite的IN子句建议不超过1000个参数）
     # 使用配置的批量大小（CP-y2-15：数据库批量操作优化）
-    from config import Config
+    from infrastructure.config import Config
     BATCH_SIZE = Config.DB_BATCH_SIZE
     all_rows = []
     
@@ -429,8 +722,8 @@ def get_channel_info_from_local_db(
                 if logger.isEnabledFor(10):  # DEBUG级别
                     explain_plan = cur.execute(
                         f"EXPLAIN QUERY PLAN SELECT channel_id, title, description, subscriber_count, view_count, "
-                        f"country, language, emails, topics, audience, updated_at "
-                        f"FROM channels WHERE channel_id IN ({placeholders})",
+                        f"country, language, emails, topics, audience, recent_videos, engagement_rate, view_rate, "
+                        f"competitor_detection, updated_at FROM channels WHERE channel_id IN ({placeholders})",
                         batch_ids
                     ).fetchall()
                     logger.debug(f"查询计划: {explain_plan}")
@@ -438,7 +731,8 @@ def get_channel_info_from_local_db(
                 cur.execute(
                     f"""
                     SELECT channel_id, title, description, subscriber_count, view_count,
-                           country, language, emails, topics, audience, updated_at
+                           country, language, emails, topics, audience,
+                           recent_videos, engagement_rate, view_rate, competitor_detection, updated_at
                     FROM channels
                     WHERE channel_id IN ({placeholders})
                     """,
@@ -513,16 +807,34 @@ def get_channel_info_from_local_db(
             _trigger_async_update_expired_channels(expired_channel_ids)
 
     # 处理查询结果（注意：如果查询时包含了updated_at，需要调整索引）
-    # 如果查询包含updated_at（11个字段），则调整索引；否则使用原来的10个字段
-    has_updated_at = len(rows) > 0 and len(rows[0]) >= 11
+    # 新版本包含15个字段：channel_id, title, description, subscriber_count, view_count,
+    # country, language, emails, topics, audience, recent_videos, engagement_rate, view_rate,
+    # competitor_detection, updated_at
+    # 旧版本可能只有11个字段（不含新字段）
+    row_length = len(rows[0]) if rows else 0
     
     results: List[Dict[str, Any]] = []
     for row in rows:
         try:
-            if has_updated_at:
+            if row_length >= 15:
+                # 新版本：包含所有字段
+                ch_id, title, desc, sub_count, view_count, country, lang, emails_json, topics_json, audience_json, \
+                    recent_videos_json, engagement_rate, view_rate, competitor_detection_json, _ = row
+            elif row_length >= 11:
+                # 旧版本：只有基本字段和updated_at
                 ch_id, title, desc, sub_count, view_count, country, lang, emails_json, topics_json, audience_json, _ = row
+                recent_videos_json = None
+                engagement_rate = None
+                view_rate = None
+                competitor_detection_json = None
             else:
+                # 更旧版本：只有10个字段
                 ch_id, title, desc, sub_count, view_count, country, lang, emails_json, topics_json, audience_json = row
+                recent_videos_json = None
+                engagement_rate = None
+                view_rate = None
+                competitor_detection_json = None
+            
             # 安全解析JSON字段
             try:
                 emails = json.loads(emails_json) if emails_json else []
@@ -542,6 +854,22 @@ def get_channel_info_from_local_db(
                 logger.warning(f"解析频道 {ch_id} 的audience JSON失败: {e}")
                 audience = []
             
+            try:
+                recent_videos = json.loads(recent_videos_json) if recent_videos_json else []
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.debug(f"解析频道 {ch_id} 的recent_videos JSON失败: {e}")
+                recent_videos = []
+            
+            try:
+                competitor_detection = json.loads(competitor_detection_json) if competitor_detection_json else {}
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.debug(f"解析频道 {ch_id} 的competitor_detection JSON失败: {e}")
+                competitor_detection = {
+                    "has_competitor_collab": False,
+                    "competitors": [],
+                    "competitor_details": {}
+                }
+            
             results.append(
                 {
                     "channelId": ch_id,
@@ -556,7 +884,10 @@ def get_channel_info_from_local_db(
                     "emails": emails,
                     "topics": topics,
                     "audience": audience,
-                    "recent_videos": [],  # 本地库暂不存最近视频，可后续扩展
+                    "recent_videos": recent_videos,  # 从数据库读取最近视频
+                    "engagement_rate": float(engagement_rate) if engagement_rate is not None else 0.0,  # 从数据库读取互动率
+                    "view_rate": float(view_rate) if view_rate is not None else 0.0,  # 从数据库读取观看率
+                    "competitor_detection": competitor_detection,  # 从数据库读取竞品检测结果
                 }
             )
         except (ValueError, TypeError, IndexError) as e:
@@ -588,7 +919,8 @@ def get_single_channel_info_from_local_db(channel_id: str) -> Dict[str, Any] | N
             cur.execute(
                 """
                 SELECT channel_id, title, description, subscriber_count, view_count,
-                       country, language, emails, topics, audience
+                       country, language, emails, topics, audience,
+                       recent_videos, engagement_rate, view_rate, competitor_detection
                 FROM channels
                 WHERE channel_id = ?
                 """,
@@ -606,7 +938,17 @@ def get_single_channel_info_from_local_db(channel_id: str) -> Dict[str, Any] | N
         return None
 
     try:
-        ch_id, title, desc, sub_count, view_count, country, lang, emails_json, topics_json, audience_json = row
+        # 兼容旧版本数据库（可能没有新字段）
+        row_length = len(row)
+        if row_length >= 14:
+            ch_id, title, desc, sub_count, view_count, country, lang, emails_json, topics_json, audience_json, \
+                recent_videos_json, engagement_rate, view_rate, competitor_detection_json = row
+        else:
+            ch_id, title, desc, sub_count, view_count, country, lang, emails_json, topics_json, audience_json = row
+            recent_videos_json = None
+            engagement_rate = None
+            view_rate = None
+            competitor_detection_json = None
         
         # 安全解析JSON字段
         try:
@@ -624,11 +966,29 @@ def get_single_channel_info_from_local_db(channel_id: str) -> Dict[str, Any] | N
         except (json.JSONDecodeError, TypeError):
             audience = []
         
+        try:
+            recent_videos = json.loads(recent_videos_json) if recent_videos_json else []
+        except (json.JSONDecodeError, TypeError):
+            recent_videos = []
+        
+        try:
+            competitor_detection = json.loads(competitor_detection_json) if competitor_detection_json else {}
+        except (json.JSONDecodeError, TypeError):
+            competitor_detection = {
+                "has_competitor_collab": False,
+                "competitors": [],
+                "competitor_details": {}
+            }
+        
         return {
             "channelId": ch_id,
             "title": title or "",
             "description": desc or "",
             "thumbnails": {},  # 本地库暂不存缩略图
+            "recent_videos": recent_videos,  # 从数据库读取最近视频
+            "engagement_rate": float(engagement_rate) if engagement_rate is not None else 0.0,  # 从数据库读取互动率
+            "view_rate": float(view_rate) if view_rate is not None else 0.0,  # 从数据库读取观看率
+            "competitor_detection": competitor_detection,  # 从数据库读取竞品检测结果
             "subscriberCount": int(sub_count or 0) if sub_count is not None else 0,
             "videoCount": 0,  # 本地库暂不存视频数
             "viewCount": int(view_count or 0) if view_count is not None else 0,
@@ -665,7 +1025,7 @@ def get_channel_basic_info_for_filtering(channel_ids: List[str]) -> Dict[str, Di
 
     # 优化：分批查询
     # 使用配置的批量大小（CP-y2-15：数据库批量操作优化）
-    from config import Config
+    from infrastructure.config import Config
     BATCH_SIZE = Config.DB_BATCH_SIZE
     all_rows = []
     
@@ -730,7 +1090,7 @@ def get_embeddings_from_local_db(channel_ids: List[str]) -> Dict[str, np.ndarray
 
     # 优化：分批查询
     # 使用配置的批量大小（CP-y2-15：数据库批量操作优化）
-    from config import Config
+    from infrastructure.config import Config
     BATCH_SIZE = Config.DB_BATCH_SIZE
     all_rows = []
     
@@ -819,8 +1179,8 @@ def _process_update_queue() -> None:
     
     try:
         # 延迟导入，避免循环依赖
-        from build_channel_index import _process_channel_data, _batch_upsert_channels
-        from cache import invalidate_all_channel_caches
+        from scripts.build_channel_index import _process_channel_data, _batch_upsert_channels
+        from infrastructure.cache import invalidate_all_channel_caches
         
         while True:
             # 从队列中取出需要更新的频道ID
@@ -870,7 +1230,6 @@ def _process_update_queue() -> None:
                     logger.warning(f"批量更新过期频道数据失败: {e}", exc_info=True)
             
             # 短暂休眠，避免占用过多资源
-            import time
             time.sleep(1)
             
     except Exception as e:
@@ -889,7 +1248,7 @@ def _process_update_queue() -> None:
                 update_thread.start()
 
 
-def get_expired_channel_ids(max_age_days: int = 7) -> List[str]:
+def get_expired_channel_ids(max_age_days: int = 60) -> List[str]:
     """
     获取所有过期频道的ID列表（CP-y4-02：索引数据自动更新）
     
@@ -995,8 +1354,8 @@ def recalculate_vectors_for_channels(channel_ids: List[str]) -> int:
     
     try:
         # 延迟导入，避免循环依赖
-        from build_channel_index import _process_channel_data, _batch_upsert_channels
-        from cache import invalidate_all_channel_caches
+        from scripts.build_channel_index import _process_channel_data, _batch_upsert_channels
+        from infrastructure.cache import invalidate_all_channel_caches
         
         logger.info(f"开始为 {len(channel_ids)} 个频道重新计算向量")
         

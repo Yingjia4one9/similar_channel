@@ -31,6 +31,11 @@ def collect_candidate_channels_from_related_videos(
     
     candidate_channel_ids: List[str] = []
     seen = set()
+    
+    # 失败计数器：如果连续失败太多次，提前停止以避免浪费配额
+    consecutive_failures = 0
+    # 从配置读取，如果没有配置则使用默认值2（更早停止以节省配额）
+    max_consecutive_failures = Config.CANDIDATE_COLLECTION.get("max_consecutive_failures", 2)
 
     for vid in video_ids:
         if len(candidate_channel_ids) >= limit:
@@ -47,16 +52,39 @@ def collect_candidate_channels_from_related_videos(
                 },
                 use_for=use_for,
             )
+            # 成功时重置失败计数器
+            consecutive_failures = 0
         except YouTubeQuotaExceededError:
             logger.error(f"搜索相关视频时配额已用完: {vid}")
             raise
         except YouTubeAPIError as e:
-            logger.warning(f"YouTube API 错误，搜索相关视频失败: {vid}, 错误: {e}")
-            # 单个视频失败不影响其他视频
+            consecutive_failures += 1
+            error_msg = str(e)
+            # 如果是"invalid argument"错误，可能是视频ID本身有问题，记录但不继续
+            if "invalid argument" in error_msg.lower():
+                logger.warning(f"视频ID无效（可能已删除或私有），跳过: {vid}")
+            else:
+                logger.warning(f"YouTube API 错误，搜索相关视频失败: {vid}, 错误: {e}")
+            
+            # 如果连续失败太多次，提前停止以避免浪费配额（阈值已从3减少到2）
+            if consecutive_failures >= max_consecutive_failures:
+                logger.warning(
+                    f"相关视频搜索连续失败 {consecutive_failures} 次，"
+                    f"提前停止以避免浪费配额。已收集 {len(candidate_channel_ids)} 个候选频道。"
+                )
+                break
             continue
         except Exception as e:
+            consecutive_failures += 1
             logger.warning(f"搜索相关视频时发生错误: {vid}, 错误: {e}", exc_info=True)
-            # 单个视频失败不影响其他视频
+            
+            # 如果连续失败太多次，提前停止
+            if consecutive_failures >= max_consecutive_failures:
+                logger.warning(
+                    f"相关视频搜索连续失败 {consecutive_failures} 次，"
+                    f"提前停止以避免浪费配额。已收集 {len(candidate_channel_ids)} 个候选频道。"
+                )
+                break
             continue
         for item in data.get("items", []):
             ch_id = item.get("snippet", {}).get("channelId")

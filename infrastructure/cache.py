@@ -2,6 +2,7 @@
 缓存模块
 提供内存缓存功能，减少重复的API调用
 """
+import json
 import threading
 import time
 from functools import wraps
@@ -175,29 +176,69 @@ def invalidate_channel_info_cache(channel_id: str) -> None:
 
 def invalidate_channel_videos_cache(channel_id: str, max_results: int | None = None) -> None:
     """
-    失效指定频道的视频列表缓存（线程安全）
+    失效指定频道的视频列表缓存（线程安全，修复竞态条件）
     
     Args:
         channel_id: 频道 ID
         max_results: 视频数量，如果为None则失效所有相关缓存
     """
+    import time
+    import json
+    log_path = r"c:\Users\A\Desktop\yt-similar-backend\.cursor\debug.log"
+    
     if max_results is not None:
         cache_key = f"channel_videos:{channel_id}:{max_results}"
         _channel_videos_cache.remove(cache_key)
         logger.debug(f"已失效频道视频缓存: {channel_id} (max_results={max_results})")
     else:
-        # 失效所有该频道的视频缓存（遍历所有键）
-        # 由于remove方法是线程安全的，我们逐个移除
-        # 注意：这里需要获取锁来遍历键，但remove方法内部也有锁
-        # 为减少锁竞争，我们一次性获取所有需要删除的键，然后逐个删除
+        # 失效所有该频道的视频缓存（修复竞态条件：在锁内完成所有操作）
         prefix = f"channel_videos:{channel_id}:"
+        keys_to_remove = []
+        log_path = r"c:\Users\A\Desktop\yt-similar-backend\.cursor\debug.log"
+        
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    "timestamp": int(time.time() * 1000),
+                    "location": "cache.py:invalidate_channel_videos_cache",
+                    "message": "开始失效缓存（修复竞态条件）",
+                    "data": {"channel_id": channel_id, "prefix": prefix},
+                    "sessionId": "debug-session",
+                    "runId": "fix-verification",
+                    "hypothesisId": "B"
+                }, ensure_ascii=False) + "\n")
+        except: pass
+        # #endregion
+        
+        # 在锁内获取所有需要删除的键并立即删除，避免竞态条件
         with _channel_videos_cache._lock:
-            keys_to_remove = [
-                key for key in list(_channel_videos_cache._cache.keys())
-                if key.startswith(prefix)
-            ]
-        for key in keys_to_remove:
-            _channel_videos_cache.remove(key)
+            # 创建键的副本列表，避免在迭代时修改字典
+            all_keys = list(_channel_videos_cache._cache.keys())
+            for key in all_keys:
+                if key.startswith(prefix):
+                    keys_to_remove.append(key)
+            
+            # 在锁内删除所有匹配的键
+            for key in keys_to_remove:
+                if key in _channel_videos_cache._cache:
+                    del _channel_videos_cache._cache[key]
+        
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    "timestamp": int(time.time() * 1000),
+                    "location": "cache.py:invalidate_channel_videos_cache",
+                    "message": "缓存失效完成",
+                    "data": {"channel_id": channel_id, "removed_count": len(keys_to_remove)},
+                    "sessionId": "debug-session",
+                    "runId": "fix-verification",
+                    "hypothesisId": "B"
+                }, ensure_ascii=False) + "\n")
+        except: pass
+        # #endregion
+        
         if keys_to_remove:
             logger.debug(f"已失效频道所有视频缓存: {channel_id} (共{len(keys_to_remove)}项)")
 

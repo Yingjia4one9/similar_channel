@@ -70,7 +70,7 @@ class YouTubeAPIClient:
         timeout = Config.get_config_value("API_TIMEOUT", Config.API_TIMEOUT, "YT_API_TIMEOUT")
         
         # 检查配额限流状态（CP-y3-05：配额限流机制）
-        from quota_tracker import DEFAULT_DAILY_QUOTA
+        from infrastructure.quota_tracker import DEFAULT_DAILY_QUOTA
         is_rate_limited, delay_seconds = check_and_update_rate_limit(
             daily_quota=DEFAULT_DAILY_QUOTA, 
             use_for=self._use_for

@@ -46,15 +46,15 @@ from core.youtube_api import YouTubeQuotaExceededError
 from infrastructure.quota_tracker import record_fallback_usage
 from core.bd_scoring import calculate_full_bd_metrics
 
+logger = get_logger()
+
 # 导入数据库保存函数（延迟导入，避免循环依赖）
 try:
-    from build_channel_index import _batch_upsert_channels
+    from scripts.build_channel_index import _batch_upsert_channels
     DB_SAVE_AVAILABLE = True
 except ImportError:
     DB_SAVE_AVAILABLE = False
     logger.warning("无法导入数据库保存函数，搜索过程中不会自动保存频道到数据库")
-
-logger = get_logger()
 
 # 导出异常类，保持向后兼容
 __all__ = ["get_similar_channels_by_url", "YouTubeQuotaExceededError"]
@@ -175,6 +175,7 @@ def _enrich_base_channel_info(
     report_progress(15, "正在获取最近视频信息...")
     base_recent_videos: List[Dict[str, Any]] = []
     try:
+        # 获取基频道的最近视频（用于显示和相似度计算）
         base_recent_videos = get_recent_video_snippets_for_channel(
             channel_id, max_results=Config.CHANNEL_INFO["recent_videos_count"], use_for="search"
         )
@@ -298,13 +299,19 @@ def _collect_candidate_channels(
     
     report_progress(30, "正在搜索相关视频频道...")
     try:
-        related_ids = collect_candidate_channels_from_related_videos(
-            recent_videos,
-            per_video=Config.CANDIDATE_COLLECTION["related_videos_per_video"],
-            limit=Config.CANDIDATE_COLLECTION["related_videos_limit"],
-            use_for="search",
-        )
-        candidate_ids.extend(related_ids)
+        # 只使用前几个视频进行相关视频搜索，减少配额消耗
+        # 从5个视频减少到3个，可以节省约40%的配额
+        videos_for_search = recent_videos[:Config.CHANNEL_INFO["recent_videos_for_similarity"]]
+        if videos_for_search:
+            related_ids = collect_candidate_channels_from_related_videos(
+                videos_for_search,
+                per_video=Config.CANDIDATE_COLLECTION["related_videos_per_video"],
+                limit=Config.CANDIDATE_COLLECTION["related_videos_limit"],
+                use_for="search",
+            )
+            candidate_ids.extend(related_ids)
+        else:
+            logger.warning("没有可用的视频用于相关视频搜索")
     except YouTubeQuotaExceededError:
         logger.warning("搜索相关视频频道时配额用尽，跳过此步骤")
         record_fallback_usage(
@@ -435,6 +442,7 @@ def _save_channels_to_db(
     candidate_infos: List[Dict[str, Any]],
     cand_vecs_list: List[np.ndarray],
     tags_list: List[Dict[str, Any]],
+    bd_mode: bool = False,
 ) -> None:
     """
     将搜索过程中获取的频道信息保存到本地数据库。
@@ -445,12 +453,18 @@ def _save_channels_to_db(
         candidate_infos: 候选频道信息列表
         cand_vecs_list: 候选频道向量列表
         tags_list: 候选频道标签列表
+        bd_mode: 是否启用BD模式（影响保存策略）
     """
     if not DB_SAVE_AVAILABLE:
         return
     
+    # BD模式：检查是否启用自动保存
+    if bd_mode and not Config.BD_AUTO_SAVE.get("enabled", True):
+        logger.debug("BD模式自动保存已禁用，跳过保存")
+        return
+    
     # 检查哪些频道需要保存（不在本地数据库中的，或需要更新的）
-    from database import get_db_connection
+    from infrastructure.database import get_db_connection
     import sqlite3
     
     # 收集所有频道ID
@@ -490,16 +504,34 @@ def _save_channels_to_db(
     # 保存基频道
     base_cid = base_info.get("channelId")
     if base_cid:
-        # 即使存在也保存（更新数据）
-        base_data = _prepare_channel_data_for_db(base_info, base_vec)
-        if base_data:
-            channels_to_save.append(base_data)
+        # BD模式：检查是否保存基频道
+        if not bd_mode or Config.BD_AUTO_SAVE.get("save_base_channel", True):
+            # 即使存在也保存（更新数据）
+            base_data = _prepare_channel_data_for_db(base_info, base_vec)
+            if base_data:
+                channels_to_save.append(base_data)
+    
+    # BD模式：确定保存优先级阈值
+    min_priority = None
+    if bd_mode and not Config.BD_AUTO_SAVE.get("save_all", False):
+        min_priority_str = Config.BD_AUTO_SAVE.get("min_priority", "medium")
+        priority_order = {"high": 3, "medium": 2, "low": 1, "skip": 0}
+        min_priority = priority_order.get(min_priority_str, 2)  # 默认medium
     
     # 保存候选频道（只保存不在数据库中的，或需要更新的）
     for idx, info in enumerate(candidate_infos):
         cid = info.get("channelId")
         if not cid:
             continue
+        
+        # BD模式：检查优先级筛选
+        if bd_mode and min_priority is not None:
+            bd_priority = info.get("bd_priority", "skip")
+            priority_order = {"high": 3, "medium": 2, "low": 1, "skip": 0}
+            channel_priority = priority_order.get(bd_priority, 0)
+            if channel_priority < min_priority:
+                logger.debug(f"BD模式：跳过低优先级频道 {cid} (优先级: {bd_priority})")
+                continue
         
         # 如果频道不在数据库中，则保存（数据库的 ON CONFLICT 会处理已存在频道的更新）
         # 对于已存在的频道，也保存以更新数据（但可以优化为只更新过期的）
@@ -538,9 +570,12 @@ def _save_channels_to_db(
         try:
             # _batch_upsert_channels 内部已经会失效缓存，这里不需要重复失效
             _batch_upsert_channels(channels_to_save)
-            logger.info(f"成功保存 {len(channels_to_save)} 个频道到本地数据库（缓存已自动失效）")
+            mode_str = "BD模式" if bd_mode else "普通模式"
+            logger.info(f"{mode_str}：成功保存 {len(channels_to_save)} 个频道到本地数据库（缓存已自动失效）")
         except Exception as e:
             logger.warning(f"批量保存频道到数据库失败: {e}", exc_info=True)
+    elif bd_mode:
+        logger.debug("BD模式：没有符合条件的频道需要保存")
 
 
 def _prepare_channel_data_for_db(info: Dict[str, Any], vec: np.ndarray) -> Tuple | None:
@@ -582,6 +617,8 @@ def _prepare_channel_data_for_db(info: Dict[str, Any], vec: np.ndarray) -> Tuple
         emails = info.get("emails", [])
         topics = info.get("topics", [])
         audience = info.get("audience", [])
+        recent_videos = info.get("recent_videos", [])
+        competitor_detection = info.get("competitor_detection", {})
         
         if not isinstance(emails, list):
             emails = []
@@ -589,9 +626,20 @@ def _prepare_channel_data_for_db(info: Dict[str, Any], vec: np.ndarray) -> Tuple
             topics = []
         if not isinstance(audience, list):
             audience = []
+        if not isinstance(recent_videos, list):
+            recent_videos = []
+        if not isinstance(competitor_detection, dict):
+            competitor_detection = {}
+        
+        # 验证数值字段
+        engagement_rate = float(info.get("engagement_rate", 0.0))
+        view_rate = float(info.get("view_rate", 0.0))
+        engagement_rate = max(0.0, engagement_rate)
+        view_rate = max(0.0, view_rate)
         
         # 准备数据格式：(channel_id, title, description, subscriber_count, view_count,
-        #                country, language, emails_json, topics_json, audience_json, embedding_bytes)
+        #                country, language, emails_json, topics_json, audience_json,
+        #                recent_videos_json, engagement_rate, view_rate, competitor_detection_json, embedding_bytes)
         return (
             cid.strip(),
             title,
@@ -603,6 +651,10 @@ def _prepare_channel_data_for_db(info: Dict[str, Any], vec: np.ndarray) -> Tuple
             json.dumps(emails, ensure_ascii=False),
             json.dumps(topics, ensure_ascii=False),
             json.dumps(audience, ensure_ascii=False),
+            json.dumps(recent_videos, ensure_ascii=False),  # 保存最近视频
+            engagement_rate,  # 保存互动率
+            view_rate,  # 保存观看率
+            json.dumps(competitor_detection, ensure_ascii=False),  # 保存竞品检测结果
             vec.astype(np.float32).tobytes(),
         )
     except Exception as e:
@@ -686,16 +738,24 @@ async def get_similar_channels_by_url(
     _report_progress(50, f"正在从本地数据库获取 {len(candidate_ids)} 个候选频道信息...")
     # 3. 优化：优先从本地数据库获取频道信息，进行粗筛，只对缺失的调用API
     # 从本地数据库获取频道信息，如果数据过期则自动在后台更新（CP-y4-02）
+    # 统一使用60天更新周期，减少API消耗
     local_infos = get_channel_info_from_local_db(
         candidate_ids, 
-        max_age_days=7,
+        max_age_days=60,
         auto_update_expired=True  # 启用自动更新过期数据
     )
     
     # 粗筛：使用本地数据库信息进行初步筛选（如果可用）
     # 这样可以在调用API前过滤掉明显不符合条件的候选
-    if local_infos and (min_subs_filter is not None or max_subs_filter is not None or 
-                        preferred_language_norm or preferred_region_norm):
+    should_filter = (
+        min_subs_filter is not None or 
+        max_subs_filter is not None or 
+        preferred_language_norm or 
+        preferred_region_norm or
+        bd_mode  # BD模式也需要粗筛（基于本地库的topics信息）
+    )
+    
+    if local_infos and should_filter:
         filtered_local_infos = []
         for info in local_infos:
             cid = info.get("channelId")
@@ -723,6 +783,37 @@ async def get_similar_channels_by_url(
                 country = (info.get("country") or "").upper()
                 if country and country != preferred_region_norm:
                     continue
+            
+            # BD模式：基于本地库的topics信息进行粗筛
+            # 如果本地库中有topics信息，检查是否包含合约交易相关主题
+            if bd_mode:
+                topics = info.get("topics", [])
+                if isinstance(topics, str):
+                    try:
+                        import json
+                        topics = json.loads(topics)
+                    except:
+                        topics = []
+                if not isinstance(topics, list):
+                    topics = []
+                
+                # 检查是否包含合约交易相关的核心主题
+                contract_topics = Config.BD_CONTRACT_TOPICS
+                excluded_topics = Config.BD_EXCLUDED_TOPICS
+                
+                topics_lower = [t.lower() if isinstance(t, str) else "" for t in topics]
+                
+                # 如果包含明确排除的主题，且没有合约相关主题，则过滤掉
+                has_excluded = any(exc.lower() in " ".join(topics_lower) for exc in excluded_topics)
+                has_contract = any(ct.lower() in " ".join(topics_lower) for ct in contract_topics)
+                
+                # 如果只有排除主题，没有合约主题，则过滤掉
+                if has_excluded and not has_contract:
+                    logger.debug(f"BD模式粗筛：过滤频道 {cid}（包含排除主题但无合约主题）")
+                    continue
+                
+                # 如果本地库有topics信息，但既没有合约主题也没有排除主题，保留（可能信息不完整）
+                # 如果完全没有topics信息，也保留（后续会通过API获取完整信息）
             
             filtered_local_infos.append(info)
         
@@ -1057,6 +1148,7 @@ async def get_similar_channels_by_url(
     
     _report_progress(90, "正在计算互动率指标...")
     # 为最终返回的 top 频道计算 E.R. 和 V.R.
+    # 优化：优先使用数据库中的数据，避免重复计算（减少API调用）
     for channel_info in top:
         cid = channel_info.get("channelId")
         subs = channel_info.get("subscriberCount", 0)
@@ -1067,6 +1159,27 @@ async def get_similar_channels_by_url(
             channel_info["view_rate"] = 0.0
             continue
         
+        # 优先使用数据库中的数据（如果存在且有效）
+        db_engagement_rate = channel_info.get("engagement_rate")
+        db_view_rate = channel_info.get("view_rate")
+        db_recent_videos = channel_info.get("recent_videos", [])
+        db_competitor_detection = channel_info.get("competitor_detection")
+        
+        # 如果数据库中有有效数据，直接使用（避免API调用）
+        if db_engagement_rate is not None and db_engagement_rate > 0 and \
+           db_view_rate is not None and db_view_rate > 0:
+            # 数据库数据有效，直接使用
+            channel_info["engagement_rate"] = float(db_engagement_rate)
+            channel_info["view_rate"] = float(db_view_rate)
+            # 如果有recent_videos，也使用数据库中的数据
+            if db_recent_videos:
+                channel_info["recent_videos"] = db_recent_videos
+            # 如果有竞品检测结果，也使用数据库中的数据
+            if db_competitor_detection:
+                channel_info["competitor_detection"] = db_competitor_detection
+            continue
+        
+        # 数据库中没有有效数据，需要重新计算（但这种情况应该很少，因为构建索引时已经计算过了）
         try:
             # 获取最近视频的平均统计数据
             stats = get_recent_videos_stats(cid, max_results=Config.CHANNEL_INFO["stats_videos_count"], use_for="search")
@@ -1091,27 +1204,52 @@ async def get_similar_channels_by_url(
     
     # 也为基频道计算 E.R. 和 V.R.
     # base_subs 已在前面计算过，直接使用
+    # 优化：优先使用数据库中的数据，避免重复计算（减少API调用）
     if base_subs > 0:
-        try:
-            base_stats = get_recent_videos_stats(channel_id, max_results=Config.CHANNEL_INFO["stats_videos_count"], use_for="search")
-            base_avg_views = base_stats["avg_views"]
-            base_avg_likes = base_stats["avg_likes"]
-            base_info["avg_views"] = round(base_avg_views, 1)
-            base_info["avg_likes"] = round(base_avg_likes, 1)
-            # base_subs > 0 已在外层检查，这里直接计算
-            base_info["engagement_rate"] = round((base_avg_likes / base_subs * 100), 1)
-            base_info["view_rate"] = round((base_avg_views / base_subs * 100), 1)
-        except Exception:
-            base_info["avg_views"] = 0.0
-            base_info["avg_likes"] = 0.0
-            base_info["engagement_rate"] = 0.0
-            base_info["view_rate"] = 0.0
+        # 优先使用数据库中的数据（如果存在且有效）
+        db_base_engagement_rate = base_info.get("engagement_rate")
+        db_base_view_rate = base_info.get("view_rate")
+        
+        # 如果数据库中有有效数据，直接使用（避免API调用）
+        if db_base_engagement_rate is not None and db_base_engagement_rate > 0 and \
+           db_base_view_rate is not None and db_base_view_rate > 0:
+            # 数据库数据有效，直接使用
+            base_info["engagement_rate"] = float(db_base_engagement_rate)
+            base_info["view_rate"] = float(db_base_view_rate)
+        else:
+            # 数据库中没有有效数据，需要重新计算
+            try:
+                base_stats = get_recent_videos_stats(channel_id, max_results=Config.CHANNEL_INFO["stats_videos_count"], use_for="search")
+                base_avg_views = base_stats["avg_views"]
+                base_avg_likes = base_stats["avg_likes"]
+                base_info["avg_views"] = round(base_avg_views, 1)
+                base_info["avg_likes"] = round(base_avg_likes, 1)
+                # base_subs > 0 已在外层检查，这里直接计算
+                base_info["engagement_rate"] = round((base_avg_likes / base_subs * 100), 1)
+                base_info["view_rate"] = round((base_avg_views / base_subs * 100), 1)
+            except Exception:
+                base_info["avg_views"] = 0.0
+                base_info["avg_likes"] = 0.0
+                base_info["engagement_rate"] = 0.0
+                base_info["view_rate"] = 0.0
+    else:
+        base_info["avg_views"] = 0.0
+        base_info["avg_likes"] = 0.0
+        base_info["engagement_rate"] = 0.0
+        base_info["view_rate"] = 0.0
     
     _report_progress(95, "正在保存新频道到本地数据库...")
     # 5. 自动保存新发现的频道到本地数据库
     if DB_SAVE_AVAILABLE:
         try:
-            _save_channels_to_db(base_info, base_vec, candidate_infos, cand_vecs_list, tags_list)
+            _save_channels_to_db(
+                base_info, 
+                base_vec, 
+                candidate_infos, 
+                cand_vecs_list, 
+                tags_list,
+                bd_mode=bd_mode
+            )
         except Exception as e:
             # 保存失败不影响搜索结果返回
             logger.warning(f"保存频道到数据库时发生错误（不影响搜索结果）: {e}", exc_info=True)

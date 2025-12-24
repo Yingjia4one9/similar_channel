@@ -65,3 +65,16 @@ export function getThumbnailUrl(thumbnails) {
   return thumbnails.medium?.url || thumbnails.default?.url || "";
 }
 
+/**
+ * HTML转义函数（CP-y5-07：XSS防护）
+ * 转义HTML特殊字符，防止XSS攻击
+ * @param {string} text - 要转义的文本
+ * @returns {string} 转义后的文本
+ */
+export function escapeHtml(text) {
+  if (!text) return "";
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+

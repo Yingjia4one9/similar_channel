@@ -37,39 +37,129 @@ class Config:
     # 嵌入模型配置
     EMBED_MODEL_NAME = "intfloat/multilingual-e5-base"
     
-    # Topics 标签（加密货币领域）
+    # ==================== 扩展后的 Topics 标签（加密货币领域） ====================
     TOPIC_LABELS: List[str] = [
+        # 主流币种
         "bitcoin",
         "ethereum",
+        "solana",
+        "bnb chain",
+        "xrp ripple",
+        "cardano",
+        "polygon matic",
+        "avalanche",
+        "layer 2 solutions",
+        
+        # 币种类型
         "altcoins",
+        "meme coins",
+        "stablecoins",
+        "privacy coins",
+        
+        # 交易类型（细分）
         "crypto trading",
-        "crypto scalping",
-        "futures trading",
         "spot trading",
-        "on chain analysis",
+        "futures trading",
+        "options trading",
+        "margin trading",
+        "leverage trading",
+        "crypto scalping",
+        "swing trading",
+        "position trading",
+        "copy trading",
+        "bot trading",
+        "arbitrage trading",
+        
+        # 分析方法
         "technical analysis",
-        "crypto news",
+        "fundamental analysis",
+        "on chain analysis",
+        "sentiment analysis",
+        "whale tracking",
+        "liquidation analysis",
+        
+        # DeFi 细分
         "defi",
-        "nft",
-        "airdrop hunting",
         "yield farming",
+        "liquidity mining",
+        "staking rewards",
+        "lending protocols",
+        "dex trading",
+        "cross chain bridges",
+        
+        # NFT 细分
+        "nft",
+        "nft trading",
+        "nft art",
+        "gaming nft",
+        
+        # 其他领域
+        "airdrop hunting",
+        "crypto news",
         "crypto education",
+        "market analysis",
+        "ico ido launchpad",
+        "crypto regulations",
+        "crypto mining",
+        "web3 development",
+        "gamefi",
+        "metaverse",
+        
+        # 内容类型
+        "live trading streams",
+        "trading signals",
+        "portfolio management",
+        "exchange reviews",
+        "wallet tutorials",
     ]
     
-    # Audience 标签
+    # ==================== 扩展后的 Audience 标签 ====================
     AUDIENCE_LABELS: List[str] = [
+        # 按经验级别
         "crypto beginners",
-        "retail crypto traders",
+        "intermediate traders",
         "advanced traders",
+        "professional traders",
+        
+        # 按交易风格
         "day traders",
+        "swing traders",
+        "scalpers",
         "long term investors",
+        "hodlers",
+        "active futures traders",
+        "leverage traders",
+        
+        # 按资金规模
+        "retail crypto traders",
+        "high net worth traders",
         "whales",
         "institutional investors",
+        
+        # 按兴趣领域
         "defi power users",
         "nft collectors",
+        "airdrop hunters",
+        "yield farmers",
+        "stakers",
+        "miners",
+        
+        # 按内容偏好
         "crypto enthusiasts",
-        "crypto educators",
+        "crypto learners",
+        "trading signal followers",
+        "technical analysts",
+        "fundamentalists",
+        
+        # 按语言/地区
+        "english speaking crypto",
+        "spanish speaking crypto",
+        "asian crypto market",
+        
+        # 其他
         "crypto content creators",
+        "crypto developers",
+        "crypto educators",
     ]
     
     # ==================== BD模式配置（交易所BD寻找KOL） ====================
@@ -256,6 +346,14 @@ class Config:
         "low": 0.3,         # BD总分 > 0.3 低优先级
     }
     
+    # BD模式：自动保存配置
+    BD_AUTO_SAVE = {
+        "enabled": True,                    # 是否启用自动保存
+        "save_all": False,                  # 是否保存所有频道（False时只保存高优先级）
+        "min_priority": "medium",           # 最低保存优先级（high/medium/low）
+        "save_base_channel": True,          # 是否保存基频道
+    }
+    
     # 相似度计算权重
     SIMILARITY_WEIGHTS = {
         "tag_score": 0.45,      # 标签相似度权重
@@ -263,26 +361,79 @@ class Config:
         "scale_score": 0.15,     # 订阅量级权重
     }
     
+    # 标签推理配置
+    TAG_INFERENCE = {
+        "max_topics": 10,           # 最多 Topics 标签数
+        "max_audience": 8,          # 最多 Audience 标签数
+        "core_threshold": 0.35,     # 核心标签阈值（高置信度）
+        "extended_threshold": 0.25, # 扩展标签阈值（中置信度）
+        "enable_mutual_exclusion": True,  # 是否启用标签互斥
+    }
+    
+    # 核心标签列表（使用较高阈值，确保准确性）
+    CORE_TOPIC_LABELS: List[str] = [
+        "bitcoin", "ethereum", "altcoins",
+        "crypto trading", "futures trading", "spot trading",
+        "technical analysis", "defi", "nft",
+        "airdrop hunting", "crypto news", "crypto education",
+    ]
+    
+    CORE_AUDIENCE_LABELS: List[str] = [
+        "crypto beginners", "advanced traders", "day traders",
+        "long term investors", "retail crypto traders", "whales",
+        "defi power users", "nft collectors", "crypto enthusiasts",
+    ]
+    
+    # 标签互斥组（同组标签只取相似度最高的一个，避免重复）
+    TOPIC_MUTUAL_EXCLUSION_GROUPS: List[List[str]] = [
+        # 交易类型互斥组
+        ["futures trading", "options trading", "margin trading", "leverage trading"],
+        # 交易风格互斥组
+        ["crypto scalping", "swing trading", "position trading"],
+        # DeFi 细分互斥组
+        ["yield farming", "liquidity mining", "staking rewards"],
+        # NFT 细分互斥组
+        ["nft", "nft trading", "nft art", "gaming nft"],
+        # 分析方法互斥组
+        ["technical analysis", "fundamental analysis"],
+    ]
+    
+    AUDIENCE_MUTUAL_EXCLUSION_GROUPS: List[List[str]] = [
+        # 经验级别互斥组
+        ["crypto beginners", "intermediate traders", "advanced traders", "professional traders"],
+        # 交易风格互斥组
+        ["day traders", "swing traders", "scalpers"],
+        # 投资者类型互斥组
+        ["long term investors", "hodlers"],
+        # 资金规模互斥组
+        ["retail crypto traders", "high net worth traders", "whales", "institutional investors"],
+    ]
+    
     # 标签推理阈值
-    TAG_THRESHOLD_BASE = 0.35    # 基础阈值
-    TAG_THRESHOLD_RATIO = 0.7    # 相对最高相似度的比例
+    TAG_THRESHOLD_BASE = 0.30    # 基础阈值
+    TAG_THRESHOLD_RATIO = 0.65   # 相对最高相似度的比例
     
     # 候选频道收集配置
     CANDIDATE_COLLECTION = {
         "local_index_max": 120,
-        "related_videos_per_video": 30,
-        "related_videos_limit": 100,
-        "title_search_limit": 80,
-        "topic_search_limit": 50,
-        "audience_search_limit": 30,
-        "max_candidates": 200,
+        # 降低相关视频召回量，减少 search API 消耗
+        "related_videos_per_video": 15,
+        "related_videos_limit": 60,
+        # 降低标题/主题召回量，减少 search API 消耗
+        "title_search_limit": 40,
+        "topic_search_limit": 30,
+        "audience_search_limit": 20,
+        # 全局候选上限降低，减少后续补齐调用
+        "max_candidates": 120,
+        "max_consecutive_failures": 2,  # 连续失败2次后停止搜索，避免浪费配额（从3减少到2）
     }
     
     # 频道信息获取配置
     CHANNEL_INFO = {
-        "recent_videos_count": 5,
-        "recent_videos_for_similarity": 3,
-        "stats_videos_count": 10,
+        # 视频侧调用量减少：拉取更少视频
+        "recent_videos_count": 3,
+        "recent_videos_for_similarity": 2,
+        "stats_videos_count": 5,
         "batch_size": 50,  # 批量获取频道信息的批次大小（YouTube API限制：最多50个）
     }
     
@@ -299,8 +450,9 @@ class Config:
     
     # 并发处理配置
     CONCURRENT_PROCESSING = {
-        "search_workers": 5,      # 主题/受众搜索的线程池大小
-        "video_fetch_workers": 10, # 视频信息获取的线程池大小
+        # 降低并发，避免瞬时打满配额
+        "search_workers": 3,      # 主题/受众搜索的线程池大小
+        "video_fetch_workers": 6, # 视频信息获取的线程池大小
         "index_build_workers": 5,  # 索引构建的线程池大小
     }
     

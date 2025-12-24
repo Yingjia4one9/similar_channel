@@ -1,34 +1,63 @@
 import json
 import os
 import sqlite3
+import sys
 import time
+from pathlib import Path
+
+# 添加项目根目录到 Python 路径（修复模块导入问题）
+_project_root = Path(__file__).parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from threading import Lock
 from typing import Iterable, List, Tuple, Optional, Dict, Any
 
-import numpy as np
+# 强制刷新输出，避免缓冲导致看不到实时日志
+sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, 'reconfigure') else None
 
+# 添加导入进度提示（numpy导入很慢，需要20-30秒）
+print("正在加载依赖库（numpy可能需要20-30秒，请稍候）...", flush=True)
+import numpy as np
+print("依赖库加载完成", flush=True)
+
+# 分步导入项目模块，添加进度提示
+print("正在导入项目模块...", flush=True)
+print("  - 导入 core.candidate_collection...", flush=True)
 from core.candidate_collection import search_candidate_channels_by_title
+print("  - 导入 infrastructure.cache...", flush=True)
 from infrastructure.cache import invalidate_all_channel_caches
+print("  - 导入 core.channel_info...", flush=True)
 from core.channel_info import (
     get_channel_basic_info,
     get_recent_video_snippets_for_channel,
 )
+print("  - 导入 core.channel_parser...", flush=True)
 from core.channel_parser import extract_channel_id_from_url
+print("  - 导入 infrastructure.config...", flush=True)
 from infrastructure.config import Config
+print("    infrastructure.config 导入完成", flush=True)
+print("  - 导入 core.embedding（sentence_transformers可能需要10-20秒）...", flush=True)
 from core.embedding import (
     get_embed_model,
     infer_topics_and_audience,
+    ensure_label_embeddings,
 )
+print("    core.embedding 导入完成", flush=True)
+print("  - 导入 infrastructure.logger...", flush=True)
 from infrastructure.logger import get_logger
+print("  - 导入 infrastructure.utils...", flush=True)
 from infrastructure.utils import build_text_for_channel, extract_emails_from_text
+print("  - 导入 core.youtube_api...", flush=True)
 from core.youtube_api import YouTubeQuotaExceededError, yt_get
+print("项目模块导入完成", flush=True)
 
 logger = get_logger()
 
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "channel_index.db")
+DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "channel_index.db"))
 
 # 线程安全的锁，用于数据库操作
 _db_lock = Lock()
@@ -83,10 +112,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     logger.debug("数据库表结构和索引已确保存在")
 
 
-def _discover_channels_by_keyword(keyword: str, max_results: int = 30) -> List[str]:
+def _discover_channels_by_keyword(keyword: str, max_results: int = 20) -> List[str]:
     """
     通过关键词搜索发现频道 ID（只搜索一次）。
-    默认 max_results=30 以减少配额消耗（原来 50）。
+    默认 max_results=20 以进一步减少配额消耗。
     """
     try:
         ids = search_candidate_channels_by_title(keyword, limit=max_results, use_for="index")
@@ -99,7 +128,7 @@ def _discover_channels_by_keyword(keyword: str, max_results: int = 30) -> List[s
         return []
 
 
-def _channel_needs_update(conn: sqlite3.Connection, channel_id: str, max_age_days: int = 7) -> bool:
+def _channel_needs_update(conn: sqlite3.Connection, channel_id: str, max_age_days: int = 60) -> bool:
     """
     检查频道是否需要更新。
     如果频道不存在或数据超过 max_age_days 天，返回 True。
@@ -182,12 +211,48 @@ def _process_channel_data(channel_id: str, recent_videos_count: int) -> Tuple[Op
 
     # 计算向量和标签
     model = get_embed_model()
+    ensure_label_embeddings(model)  # 初始化标签向量（修复：确保topics和audience能正确生成）
     text = build_text_for_channel(info)
     vec = model.encode([text], convert_to_numpy=True)[0]
 
     tags = infer_topics_and_audience(np.expand_dims(vec, axis=0))
     info["topics"] = tags["topics"]
     info["audience"] = tags["audience"]
+    
+    # 计算互动率和观看率（用于BD评分，避免搜索时重复计算）
+    try:
+        from core.channel_info import get_recent_videos_stats
+        from infrastructure.config import Config
+        stats = get_recent_videos_stats(channel_id, max_results=Config.CHANNEL_INFO["stats_videos_count"], use_for="index")
+        subs = info.get("subscriberCount", 0)
+        if subs > 0:
+            avg_likes = stats.get("avg_likes", 0.0)
+            avg_views = stats.get("avg_views", 0.0)
+            info["engagement_rate"] = round((avg_likes / subs * 100), 1)
+            info["view_rate"] = round((avg_views / subs * 100), 1)
+        else:
+            info["engagement_rate"] = 0.0
+            info["view_rate"] = 0.0
+    except Exception as e:
+        logger.debug(f"计算频道 {channel_id} 的互动率和观看率失败: {e}")
+        info["engagement_rate"] = 0.0
+        info["view_rate"] = 0.0
+    
+    # 检测竞品合作（用于BD评分，避免搜索时重复检测）
+    try:
+        from core.bd_scoring import detect_competitor_collaborations
+        competitor_result = detect_competitor_collaborations(
+            info.get("description", ""),
+            recent_videos
+        )
+        info["competitor_detection"] = competitor_result
+    except Exception as e:
+        logger.debug(f"检测频道 {channel_id} 的竞品合作失败: {e}")
+        info["competitor_detection"] = {
+            "has_competitor_collab": False,
+            "competitors": [],
+            "competitor_details": {}
+        }
 
     return (info, vec)
 
@@ -198,15 +263,17 @@ def _validate_channel_data(channel_data: Tuple) -> Tuple | None:
     
     Args:
         channel_data: (channel_id, title, description, subscriber_count, view_count,
-                      country, language, emails_json, topics_json, audience_json, embedding_bytes)
+                      country, language, emails_json, topics_json, audience_json,
+                      recent_videos_json, engagement_rate, view_rate, competitor_detection_json, embedding_bytes)
     
     Returns:
         验证后的数据元组，如果验证失败则返回 None
     """
-    if not channel_data or len(channel_data) != 11:
+    if not channel_data or len(channel_data) != 15:
         return None
     
-    ch_id, title, desc, sub_count, view_count, country, lang, emails_json, topics_json, audience_json, embedding = channel_data
+    ch_id, title, desc, sub_count, view_count, country, lang, emails_json, topics_json, audience_json, \
+        recent_videos_json, engagement_rate, view_rate, competitor_detection_json, embedding = channel_data
     
     # 验证必填字段
     if not ch_id or not isinstance(ch_id, str) or not ch_id.strip():
@@ -241,18 +308,41 @@ def _validate_channel_data(channel_data: Tuple) -> Tuple | None:
             audience_list = json.loads(audience_json) if isinstance(audience_json, str) else audience_json
             if not isinstance(audience_list, list):
                 audience_json = "[]"
+        if recent_videos_json:
+            recent_videos_list = json.loads(recent_videos_json) if isinstance(recent_videos_json, str) else recent_videos_json
+            if not isinstance(recent_videos_list, list):
+                recent_videos_json = "[]"
+        if competitor_detection_json:
+            competitor_detection_dict = json.loads(competitor_detection_json) if isinstance(competitor_detection_json, str) else competitor_detection_json
+            if not isinstance(competitor_detection_dict, dict):
+                competitor_detection_json = "{}"
     except (json.JSONDecodeError, TypeError) as e:
         # JSON解析失败，使用空数组
         logger.debug(f"解析频道JSON字段失败: {e}，使用空数组")
         emails_json = "[]"
         topics_json = "[]"
         audience_json = "[]"
+        recent_videos_json = "[]"
+        competitor_detection_json = "{}"
+    
+    # 验证数值字段（engagement_rate, view_rate）
+    try:
+        engagement_rate = float(engagement_rate) if engagement_rate is not None else 0.0
+        view_rate = float(view_rate) if view_rate is not None else 0.0
+        # 确保非负
+        engagement_rate = max(0.0, engagement_rate)
+        view_rate = max(0.0, view_rate)
+    except (ValueError, TypeError) as e:
+        logger.debug(f"验证频道互动率和观看率字段失败: {e}")
+        engagement_rate = 0.0
+        view_rate = 0.0
     
     # 验证向量
     if embedding is None:
         return None
     
-    return (ch_id.strip(), title, desc, sub_count, view_count, country, lang, emails_json, topics_json, audience_json, embedding)
+    return (ch_id.strip(), title, desc, sub_count, view_count, country, lang, emails_json, topics_json, audience_json,
+            recent_videos_json, engagement_rate, view_rate, competitor_detection_json, embedding)
 
 
 def _batch_upsert_channels(channel_data_list: List[Tuple]) -> None:
@@ -323,62 +413,72 @@ def _execute_batch_upsert(validated_data: List[Tuple]) -> None:
     Args:
         validated_data: 已验证的频道数据列表
     """
-    from database import get_db_connection
+    from infrastructure.database import get_db_connection
     
     # 使用数据库上下文管理器（CP-y2-15：数据库批量操作优化）
+    # 注意：连接池已经提供线程安全，不需要额外的_db_lock（避免死锁）
     with get_db_connection() as conn:
         # 确保schema存在
         _ensure_schema(conn)
         
-        with _db_lock:
-            cur = conn.cursor()
-            
-            # 准备批量数据
-            channels_data = [
-                (ch_id, title, desc, sub_count, view_count, country, lang, emails, topics, audience)
-                for ch_id, title, desc, sub_count, view_count, country, lang, emails, topics, audience, _ in validated_data
-            ]
-            embeddings_data = [
-                (ch_id, embedding)
-                for ch_id, _, _, _, _, _, _, _, _, _, embedding in validated_data
-            ]
-            
-            # 使用事务批量插入频道信息
-            cur.executemany(
-                """
-                INSERT INTO channels (
-                    channel_id, title, description,
-                    subscriber_count, view_count,
-                    country, language,
-                    emails, topics, audience, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(channel_id) DO UPDATE SET
-                    title=excluded.title,
-                    description=excluded.description,
-                    subscriber_count=excluded.subscriber_count,
-                    view_count=excluded.view_count,
-                    country=excluded.country,
-                    language=excluded.language,
-                    emails=excluded.emails,
-                    topics=excluded.topics,
-                    audience=excluded.audience,
-                    updated_at=CURRENT_TIMESTAMP
-                """,
-                channels_data
-            )
-            
-            # 批量插入向量
-            cur.executemany(
-                """
-                INSERT INTO channel_embeddings (channel_id, embedding)
-                VALUES (?, ?)
-                ON CONFLICT(channel_id) DO UPDATE SET
-                    embedding=excluded.embedding
-                """,
-                embeddings_data
-            )
-            
-            # 事务会在上下文管理器退出时自动提交
+        # 移除_db_lock，连接池已经提供线程安全
+        # 如果确实需要额外保护，应该使用连接级别的锁，而不是全局锁
+        cur = conn.cursor()
+        
+        # 准备批量数据
+        channels_data = [
+            (ch_id, title, desc, sub_count, view_count, country, lang, emails, topics, audience,
+             recent_videos, engagement_rate, view_rate, competitor_detection)
+            for ch_id, title, desc, sub_count, view_count, country, lang, emails, topics, audience,
+                recent_videos, engagement_rate, view_rate, competitor_detection, _ in validated_data
+        ]
+        embeddings_data = [
+            (ch_id, embedding)
+            for ch_id, _, _, _, _, _, _, _, _, _, _, _, _, _, embedding in validated_data
+        ]
+        
+        # 使用事务批量插入频道信息
+        cur.executemany(
+            """
+            INSERT INTO channels (
+                channel_id, title, description,
+                subscriber_count, view_count,
+                country, language,
+                emails, topics, audience,
+                recent_videos, engagement_rate, view_rate, competitor_detection,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(channel_id) DO UPDATE SET
+                title=excluded.title,
+                description=excluded.description,
+                subscriber_count=excluded.subscriber_count,
+                view_count=excluded.view_count,
+                country=excluded.country,
+                language=excluded.language,
+                emails=excluded.emails,
+                topics=excluded.topics,
+                audience=excluded.audience,
+                recent_videos=excluded.recent_videos,
+                engagement_rate=excluded.engagement_rate,
+                view_rate=excluded.view_rate,
+                competitor_detection=excluded.competitor_detection,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            channels_data
+        )
+        
+        # 批量插入向量
+        cur.executemany(
+            """
+            INSERT INTO channel_embeddings (channel_id, embedding)
+            VALUES (?, ?)
+            ON CONFLICT(channel_id) DO UPDATE SET
+                embedding=excluded.embedding
+            """,
+            embeddings_data
+        )
+        
+        # 事务会在上下文管理器退出时自动提交
     
     # 失效相关缓存（在事务外执行，避免阻塞）
     for ch_id, _, _, _, _, _, _, _, _, _, _ in validated_data:
@@ -392,17 +492,16 @@ def _process_channel_worker(channel_id: str, skip_if_recent: bool, recent_videos
     Returns:
         (success: bool, data: tuple | None) - 如果成功，返回 (True, channel_data)，否则返回 (False, None)
     """
-    # 每个线程使用独立的数据库连接（仅用于检查是否需要更新）
-    conn = sqlite3.connect(DB_PATH)
-    _ensure_schema(conn)
+    # 使用连接池而不是直接连接（统一连接管理，避免阻塞）
+    from infrastructure.database import get_db_connection
     
+    # 使用连接池检查是否需要更新（修复作用域问题）
     try:
-        # 检查是否需要更新
-        if skip_if_recent and not _channel_needs_update(conn, channel_id, max_age_days):
-            conn.close()
-            return (False, None)  # 跳过，数据还新鲜
-        
-        conn.close()
+        with get_db_connection() as conn:
+            _ensure_schema(conn)
+            # 检查是否需要更新（在with块内完成）
+            if skip_if_recent and not _channel_needs_update(conn, channel_id, max_age_days):
+                return (False, None)  # 跳过，数据还新鲜
         
         # 处理频道数据（获取信息、计算向量和标签）
         info, vec = _process_channel_data(channel_id, recent_videos_count)
@@ -422,16 +521,18 @@ def _process_channel_worker(channel_id: str, skip_if_recent: bool, recent_videos
             json.dumps(info.get("emails", []), ensure_ascii=False),
             json.dumps(info.get("topics", []), ensure_ascii=False),
             json.dumps(info.get("audience", []), ensure_ascii=False),
+            json.dumps(info.get("recent_videos", []), ensure_ascii=False),  # 保存最近视频
+            float(info.get("engagement_rate", 0.0)),  # 保存互动率
+            float(info.get("view_rate", 0.0)),  # 保存观看率
+            json.dumps(info.get("competitor_detection", {}), ensure_ascii=False),  # 保存竞品检测结果
             vec.astype(np.float32).tobytes(),
         )
         
         return (True, channel_data)
         
     except YouTubeQuotaExceededError:
-        conn.close()
         raise  # 重新抛出，让上层知道需要停止
     except Exception as e:
-        conn.close()
         logger.warning(f"处理频道 {channel_id} 失败: {e}")
         return (False, None)
 
@@ -439,10 +540,11 @@ def _process_channel_worker(channel_id: str, skip_if_recent: bool, recent_videos
 def build_index(
     seed_channel_ids: Iterable[str] | None = None,
     keywords: Iterable[str] | None = None,
-    max_age_days: int = 7,
-    recent_videos_count: int = 3,
+    max_age_days: int = 60,
+    recent_videos_count: int = 2,
     max_workers: int | None = None,
     batch_size: int = 20,
+    max_channels_to_update: int | None = 200,
 ) -> None:
     """
     构建/更新本地加密货币频道索引（优化版：支持并行处理和批量更新）。
@@ -450,7 +552,7 @@ def build_index(
     Args:
         seed_channel_ids: 你手动收集的一批优质币圈频道 ID。
         keywords: 用于搜索频道的关键词。
-        max_age_days: 频道数据超过多少天需要更新（默认 7 天）。
+        max_age_days: 频道数据超过多少天需要更新（默认 60 天，减少API消耗）。
         recent_videos_count: 获取每个频道最近多少个视频（默认 3，原来 5，可减少配额消耗）。
         max_workers: 并行处理的线程数（如果为None，则使用Config中的配置）。
         batch_size: 批量提交到数据库的频道数量（默认 20）。
@@ -459,9 +561,67 @@ def build_index(
     if max_workers is None:
         max_workers = Config.get_thread_pool_size("index_build_workers", Config.CONCURRENT_PROCESSING["index_build_workers"])
     
-    conn = sqlite3.connect(DB_PATH)
-    _ensure_schema(conn)
-
+    logger.info("=" * 60)
+    logger.info("开始构建/更新频道索引")
+    logger.info(f"配置: 线程数={max_workers}, 批量大小={batch_size}, 最大更新数={max_channels_to_update}")
+    logger.info("=" * 60)
+    
+    # 添加调试日志到文件
+    log_path = r"c:\Users\A\Desktop\yt-similar-backend\.cursor\debug.log"
+    try:
+        import json
+        import time
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({
+                "timestamp": int(time.time() * 1000),
+                "location": "build_channel_index.py:build_index",
+                "message": "开始构建/更新频道索引",
+                "data": {"max_workers": max_workers, "batch_size": batch_size, "max_channels_to_update": max_channels_to_update},
+                "sessionId": "debug-session",
+                "runId": "build-index",
+                "hypothesisId": "START"
+            }, ensure_ascii=False) + "\n")
+    except: pass
+    
+    # 使用连接池统一管理连接
+    from infrastructure.database import get_db_connection
+    
+    # 初始化schema（使用临时连接，添加日志）
+    logger.info("正在初始化数据库连接和表结构...")
+    try:
+        with get_db_connection() as init_conn:
+            _ensure_schema(init_conn)
+        logger.info("数据库初始化完成")
+        # 添加调试日志
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    "timestamp": int(time.time() * 1000),
+                    "location": "build_channel_index.py:build_index",
+                    "message": "数据库初始化完成",
+                    "data": {},
+                    "sessionId": "debug-session",
+                    "runId": "build-index",
+                    "hypothesisId": "START"
+                }, ensure_ascii=False) + "\n")
+        except: pass
+    except Exception as e:
+        logger.error(f"数据库初始化失败: {e}", exc_info=True)
+        # 添加错误日志
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    "timestamp": int(time.time() * 1000),
+                    "location": "build_channel_index.py:build_index",
+                    "message": "数据库初始化失败",
+                    "data": {"error": str(e)},
+                    "sessionId": "debug-session",
+                    "runId": "build-index",
+                    "hypothesisId": "START"
+                }, ensure_ascii=False) + "\n")
+        except: pass
+        raise
+    
     seen: set[str] = set()
 
     all_ids: List[str] = []
@@ -481,24 +641,28 @@ def build_index(
     logger.info(f"正在检查 {len(unique_ids)} 个频道是否需要更新...")
     needs_update = []
     skipped = 0
-    for ch_id in unique_ids:
-        if _channel_needs_update(conn, ch_id, max_age_days=max_age_days):
-            needs_update.append(ch_id)
-        else:
-            skipped += 1
+    
+    # 使用连接池检查频道更新状态
+    with get_db_connection() as check_conn:
+        for ch_id in unique_ids:
+            if _channel_needs_update(check_conn, ch_id, max_age_days=max_age_days):
+                needs_update.append(ch_id)
+            else:
+                skipped += 1
     
     logger.info(f"频道统计: 总计 {len(unique_ids)} 个，需要更新 {len(needs_update)} 个，跳过 {skipped} 个")
-    logger.info(f"配额使用估算: 约 {len(needs_update) * 101} 单位（每个频道 101 单位）")
+    if max_channels_to_update is not None and len(needs_update) > max_channels_to_update:
+        needs_update = needs_update[:max_channels_to_update]
+        logger.info(f"为控制配额，本次仅处理前 {max_channels_to_update} 个需要更新的频道")
+    # 估算配额：channels(1) + playlistItems(约100) ~ 101，取整到 100
+    logger.info(f"配额使用估算: 约 {len(needs_update) * 100} 单位（每个频道 ~100 单位）")
     logger.info(f"并行处理配置: 线程数 {max_workers}，批量大小 {batch_size}")
     
     if not needs_update:
         logger.info("所有频道数据都是最新的，无需更新！")
-        conn.close()
         return
     
     logger.info(f"开始并行处理 {len(needs_update)} 个需要更新的频道...")
-    
-    conn.close()  # 关闭主连接，工作线程会创建自己的连接
     
     processed_count = 0
     failed_count = 0
@@ -577,6 +741,29 @@ def build_index(
 
 
 if __name__ == "__main__":
+    print("=" * 60, flush=True)
+    print("YouTube频道索引构建脚本", flush=True)
+    print("=" * 60, flush=True)
+    
+    # 添加启动日志
+    log_path = r"c:\Users\A\Desktop\yt-similar-backend\.cursor\debug.log"
+    try:
+        import json
+        import time
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({
+                "timestamp": int(time.time() * 1000),
+                "location": "build_channel_index.py:__main__",
+                "message": "脚本开始执行",
+                "data": {},
+                "sessionId": "debug-session",
+                "runId": "build-index",
+                "hypothesisId": "START"
+            }, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"警告：无法写入启动日志: {e}", flush=True)
+    
+    print("正在初始化...", flush=True)
     # 你可以在这里填写你自己常看的/认为优质的币圈频道链接或 ID 作为种子。
     raw_seed_channels: List[str] = [
         "https://www.youtube.com/@Crypto621",

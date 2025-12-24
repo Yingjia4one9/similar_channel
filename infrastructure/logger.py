@@ -31,9 +31,14 @@ def setup_logger(
     
     logger.setLevel(level)
     
-    # 创建控制台 handler
+    # 创建控制台 handler（强制刷新输出，避免缓冲导致看不到实时日志）
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(level)
+    # 设置流为无缓冲模式，确保实时输出
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(line_buffering=True)
+        except: pass
     
     # 设置格式
     if format_string is None:
