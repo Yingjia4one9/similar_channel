@@ -41,14 +41,17 @@ YouTube api key*.txt
 *.pem
 .env
 .env.local
-data/*.txt
-data/*.db
+
+# Data directory (contains databases, API keys, exports, etc.)
+data/
+!data/.gitkeep
+!data/exports/.gitkeep
 
 # Configuration files (may contain sensitive data)
 config.json
 !config.json.example
 
-# Database files
+# Database files (already covered by data/ above, but kept for files outside data/)
 *.db
 *.db-shm
 *.db-wal
