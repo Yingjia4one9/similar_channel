@@ -2,6 +2,9 @@
 配置管理模块
 统一管理 Topics/Audience 标签、API 配置等
 支持环境变量、配置文件、多环境配置
+
+注意：业务规则（如标签体系、权重配置）已迁移到 core.business_rules 模块
+本模块保留向后兼容的属性访问器
 """
 import json
 import os
@@ -38,380 +41,76 @@ class Config:
     EMBED_MODEL_NAME = "intfloat/multilingual-e5-base"
     
     # ==================== 扩展后的 Topics 标签（加密货币领域） ====================
-    TOPIC_LABELS: List[str] = [
-        # 主流币种
-        "bitcoin",
-        "ethereum",
-        "solana",
-        "bnb chain",
-        "xrp ripple",
-        "cardano",
-        "polygon matic",
-        "avalanche",
-        "layer 2 solutions",
-        
-        # 币种类型
-        "altcoins",
-        "meme coins",
-        "stablecoins",
-        "privacy coins",
-        
-        # 交易类型（细分）
-        "crypto trading",
-        "spot trading",
-        "futures trading",
-        "options trading",
-        "margin trading",
-        "leverage trading",
-        "crypto scalping",
-        "swing trading",
-        "position trading",
-        "copy trading",
-        "bot trading",
-        "arbitrage trading",
-        
-        # 分析方法
-        "technical analysis",
-        "fundamental analysis",
-        "on chain analysis",
-        "sentiment analysis",
-        "whale tracking",
-        "liquidation analysis",
-        
-        # DeFi 细分
-        "defi",
-        "yield farming",
-        "liquidity mining",
-        "staking rewards",
-        "lending protocols",
-        "dex trading",
-        "cross chain bridges",
-        
-        # NFT 细分
-        "nft",
-        "nft trading",
-        "nft art",
-        "gaming nft",
-        
-        # 其他领域
-        "airdrop hunting",
-        "crypto news",
-        "crypto education",
-        "market analysis",
-        "ico ido launchpad",
-        "crypto regulations",
-        "crypto mining",
-        "web3 development",
-        "gamefi",
-        "metaverse",
-        
-        # 内容类型
-        "live trading streams",
-        "trading signals",
-        "portfolio management",
-        "exchange reviews",
-        "wallet tutorials",
-    ]
+    # 注意：业务规则已迁移到 core.business_rules 模块
+    # 以下类属性在模块加载时从 business_rules 模块初始化（见文件末尾的 _init_business_rules_from_module）
+    # 如需修改业务规则，请编辑 core/business_rules.py
+    # 原定义已删除，实际值在模块加载时从 business_rules 模块获取
+    TOPIC_LABELS: List[str] = []  # 占位符，实际值在模块加载时初始化
     
     # ==================== 扩展后的 Audience 标签 ====================
-    AUDIENCE_LABELS: List[str] = [
-        # 按经验级别
-        "crypto beginners",
-        "intermediate traders",
-        "advanced traders",
-        "professional traders",
-        
-        # 按交易风格
-        "day traders",
-        "swing traders",
-        "scalpers",
-        "long term investors",
-        "hodlers",
-        "active futures traders",
-        "leverage traders",
-        
-        # 按资金规模
-        "retail crypto traders",
-        "high net worth traders",
-        "whales",
-        "institutional investors",
-        
-        # 按兴趣领域
-        "defi power users",
-        "nft collectors",
-        "airdrop hunters",
-        "yield farmers",
-        "stakers",
-        "miners",
-        
-        # 按内容偏好
-        "crypto enthusiasts",
-        "crypto learners",
-        "trading signal followers",
-        "technical analysts",
-        "fundamentalists",
-        
-        # 按语言/地区
-        "english speaking crypto",
-        "spanish speaking crypto",
-        "asian crypto market",
-        
-        # 其他
-        "crypto content creators",
-        "crypto developers",
-        "crypto educators",
-    ]
+    # 注意：已迁移到 core.business_rules 模块
+    AUDIENCE_LABELS: List[str] = []  # 占位符，实际值在模块加载时初始化
     
     # ==================== BD模式配置（交易所BD寻找KOL） ====================
+    # 注意：已迁移到 core.business_rules 模块
     
     # BD模式：合约交易相关Topics标签（按优先级排序）
-    BD_CONTRACT_TOPICS: List[str] = [
-        # 核心目标（高优先级）- 合约/杠杆交易
-        "futures trading",
-        "leverage trading",
-        "perpetual contracts",
-        "margin trading",
-        "crypto scalping",
-        "liquidation analysis",
-        # 强相关（中优先级）
-        "technical analysis",
-        "crypto trading signals",
-        "whale watching",
-        "funding rate",
-        "copy trading",
-        "day trading",
-        # 弱相关（低优先级）
-        "spot trading",
-        "bitcoin price prediction",
-        "altcoin trading",
-        "crypto news",
-    ]
+    BD_CONTRACT_TOPICS: List[str] = []  # 占位符，实际值在模块加载时初始化
     
     # BD模式：排除的Topics（这些通常不是合约交易受众）
-    BD_EXCLUDED_TOPICS: List[str] = [
-        "defi",
-        "nft",
-        "airdrop hunting",
-        "yield farming",
-        "crypto education",
-        "gamefi",
-        "meme coins",
-    ]
+    BD_EXCLUDED_TOPICS: List[str] = []  # 占位符，实际值在模块加载时初始化
     
     # BD模式：受众标签（按交易活跃度优先级排序）
-    BD_AUDIENCE_LABELS: List[str] = [
-        # 高价值目标受众（活跃交易者）
-        "active futures traders",
-        "leverage traders",
-        "scalpers",
-        "day traders",
-        "swing traders",
-        # 中等价值（有交易习惯）
-        "retail crypto traders",
-        "advanced traders",
-        "crypto enthusiasts",
-        # 低价值（可能只是观众）
-        "crypto beginners",
-        "crypto learners",
-        "long term investors",
-    ]
+    BD_AUDIENCE_LABELS: List[str] = []  # 占位符，实际值在模块加载时初始化
     
     # BD模式：内容类型标签
-    BD_CONTENT_TYPE_LABELS: List[str] = [
-        "daily market updates",      # 每日行情分析
-        "live trading",              # 实盘直播
-        "trading tutorials",         # 交易教程
-        "trade setups",              # 交易布局分享
-        "market analysis",           # 市场深度分析
-        "trading signals",           # 交易信号
-        "exchange reviews",          # 交易所测评
-        "portfolio updates",         # 仓位分享
-    ]
+    BD_CONTENT_TYPE_LABELS: List[str] = []  # 占位符，实际值在模块加载时初始化
     
     # BD模式：竞品交易所检测配置
-    COMPETITOR_EXCHANGES: Dict[str, List[str]] = {
-        "binance": [
-            "binance.com/referral", "binance.com/register", "binance.com/activity",
-            "accounts.binance.com", "binance.com/en/register",
-        ],
-        "bybit": [
-            "bybit.com/register", "partner.bybit.com", "bybit.com/referral",
-            "bybit.com/en-US/register", "bybit.com/invite",
-        ],
-        "okx": [
-            "okx.com/join", "okx.com/referral", "okx.com/account/register",
-            "okx.com/cn/join", "okex.com",
-        ],
-        "bitget": [
-            "bitget.com/referral", "partner.bitget.com", "bitget.com/register",
-            "bitget.com/en/referral",
-        ],
-        "gate": [
-            "gate.io/referral", "gate.io/signup", "gate.io/ref",
-        ],
-        "kucoin": [
-            "kucoin.com/ucenter/signup", "kucoin.com/referral", "kucoin.com/land",
-        ],
-        "mexc": [
-            "mexc.com/register", "mexc.com/referral",
-        ],
-        "htx": [
-            "htx.com/invite", "htx.com/register", "huobi.com",
-        ],
-        "bingx": [
-            "bingx.com/invite", "bingx.com/register", "bingx.com/referral",
-        ],
-        "phemex": [
-            "phemex.com/register", "phemex.com/referral",
-        ],
-    }
+    COMPETITOR_EXCHANGES: Dict[str, List[str]] = {}  # 占位符，实际值在模块加载时初始化
     
     # BD模式：商业化相关关键词
-    BD_COLLAB_KEYWORDS: List[str] = [
-        "sponsor", "sponsored", "partnership", "partner",
-        "合作", "赞助", "商务", "business",
-        "referral", "affiliate", "返佣", "commission",
-        "promo", "promotion", "code", "link",
-    ]
+    BD_COLLAB_KEYWORDS: List[str] = []  # 占位符，实际值在模块加载时初始化
     
     # BD模式：相似度权重配置
-    BD_SIMILARITY_WEIGHTS: Dict[str, float] = {
-        "contract_focus_score": 0.30,    # 合约内容聚焦度（最重要）
-        "audience_quality_score": 0.20,  # 受众质量（真实交易者）
-        "commercialization_score": 0.20, # 商业化潜力
-        "engagement_rate_score": 0.15,   # 互动率
-        "semantic_sim": 0.10,            # 语义相似度
-        "scale_score": 0.05,             # 规模（订阅数）
-    }
+    BD_SIMILARITY_WEIGHTS: Dict[str, float] = {}  # 占位符，实际值在模块加载时初始化
     
     # BD模式：合约聚焦度计算权重
-    BD_TOPIC_WEIGHTS: Dict[str, float] = {
-        # 核心合约相关（权重1.0）
-        "futures trading": 1.0,
-        "leverage trading": 1.0,
-        "perpetual contracts": 1.0,
-        "margin trading": 1.0,
-        "crypto scalping": 1.0,
-        "liquidation analysis": 1.0,
-        # 强相关（权重0.7）
-        "technical analysis": 0.7,
-        "crypto trading signals": 0.7,
-        "whale watching": 0.7,
-        "funding rate": 0.7,
-        "copy trading": 0.7,
-        "day trading": 0.7,
-        # 弱相关（权重0.3）
-        "spot trading": 0.3,
-        "bitcoin price prediction": 0.3,
-        "altcoin trading": 0.3,
-        "crypto news": 0.3,
-        # 不相关/负面（权重-0.3）
-        "defi": -0.3,
-        "nft": -0.3,
-        "airdrop hunting": -0.3,
-        "yield farming": -0.3,
-        "crypto education": -0.2,
-    }
+    BD_TOPIC_WEIGHTS: Dict[str, float] = {}  # 占位符，实际值在模块加载时初始化
     
     # BD模式：受众质量权重
-    BD_AUDIENCE_WEIGHTS: Dict[str, float] = {
-        # 高价值（权重1.0）
-        "active futures traders": 1.0,
-        "leverage traders": 1.0,
-        "scalpers": 1.0,
-        "day traders": 0.9,
-        "swing traders": 0.8,
-        # 中等价值（权重0.5）
-        "retail crypto traders": 0.5,
-        "advanced traders": 0.5,
-        "crypto enthusiasts": 0.4,
-        # 低价值（权重0.1-0.2）
-        "crypto beginners": 0.2,
-        "crypto learners": 0.1,
-        "long term investors": 0.3,
-    }
+    BD_AUDIENCE_WEIGHTS: Dict[str, float] = {}  # 占位符，实际值在模块加载时初始化
     
     # BD模式：互动率评分阈值
-    BD_ENGAGEMENT_THRESHOLDS: Dict[str, float] = {
-        "excellent": 3.0,   # E.R. > 3% 优秀
-        "good": 2.0,        # E.R. > 2% 良好
-        "average": 1.0,     # E.R. > 1% 一般
-        "poor": 0.5,        # E.R. < 0.5% 较差
-    }
+    BD_ENGAGEMENT_THRESHOLDS: Dict[str, float] = {}  # 占位符，实际值在模块加载时初始化
     
     # BD模式：优先级分类阈值
-    BD_PRIORITY_THRESHOLDS: Dict[str, float] = {
-        "high": 0.7,        # BD总分 > 0.7 高优先级
-        "medium": 0.5,      # BD总分 > 0.5 中优先级
-        "low": 0.3,         # BD总分 > 0.3 低优先级
-    }
+    BD_PRIORITY_THRESHOLDS: Dict[str, float] = {}  # 占位符，实际值在模块加载时初始化
     
     # BD模式：自动保存配置
-    BD_AUTO_SAVE = {
-        "enabled": True,                    # 是否启用自动保存
-        "save_all": False,                  # 是否保存所有频道（False时只保存高优先级）
-        "min_priority": "medium",           # 最低保存优先级（high/medium/low）
-        "save_base_channel": True,          # 是否保存基频道
-    }
+    BD_AUTO_SAVE: Dict[str, Any] = {}  # 占位符，实际值在模块加载时初始化
     
     # 相似度计算权重
-    SIMILARITY_WEIGHTS = {
-        "tag_score": 0.45,      # 标签相似度权重
-        "semantic_sim": 0.40,    # 语义相似度权重
-        "scale_score": 0.15,     # 订阅量级权重
-    }
+    # 注意：已迁移到 core.business_rules 模块
+    SIMILARITY_WEIGHTS: Dict[str, float] = {}  # 占位符，实际值在模块加载时初始化
     
     # 标签推理配置
-    TAG_INFERENCE = {
-        "max_topics": 10,           # 最多 Topics 标签数
-        "max_audience": 8,          # 最多 Audience 标签数
-        "core_threshold": 0.35,     # 核心标签阈值（高置信度）
-        "extended_threshold": 0.25, # 扩展标签阈值（中置信度）
-        "enable_mutual_exclusion": True,  # 是否启用标签互斥
-    }
+    # 注意：已迁移到 core.business_rules 模块
+    TAG_INFERENCE: Dict[str, Any] = {}  # 占位符，实际值在模块加载时初始化
     
     # 核心标签列表（使用较高阈值，确保准确性）
-    CORE_TOPIC_LABELS: List[str] = [
-        "bitcoin", "ethereum", "altcoins",
-        "crypto trading", "futures trading", "spot trading",
-        "technical analysis", "defi", "nft",
-        "airdrop hunting", "crypto news", "crypto education",
-    ]
+    CORE_TOPIC_LABELS: List[str] = []  # 占位符，实际值在模块加载时初始化
     
-    CORE_AUDIENCE_LABELS: List[str] = [
-        "crypto beginners", "advanced traders", "day traders",
-        "long term investors", "retail crypto traders", "whales",
-        "defi power users", "nft collectors", "crypto enthusiasts",
-    ]
+    CORE_AUDIENCE_LABELS: List[str] = []  # 占位符，实际值在模块加载时初始化
     
     # 标签互斥组（同组标签只取相似度最高的一个，避免重复）
-    TOPIC_MUTUAL_EXCLUSION_GROUPS: List[List[str]] = [
-        # 交易类型互斥组
-        ["futures trading", "options trading", "margin trading", "leverage trading"],
-        # 交易风格互斥组
-        ["crypto scalping", "swing trading", "position trading"],
-        # DeFi 细分互斥组
-        ["yield farming", "liquidity mining", "staking rewards"],
-        # NFT 细分互斥组
-        ["nft", "nft trading", "nft art", "gaming nft"],
-        # 分析方法互斥组
-        ["technical analysis", "fundamental analysis"],
-    ]
+    TOPIC_MUTUAL_EXCLUSION_GROUPS: List[List[str]] = []  # 占位符，实际值在模块加载时初始化
     
-    AUDIENCE_MUTUAL_EXCLUSION_GROUPS: List[List[str]] = [
-        # 经验级别互斥组
-        ["crypto beginners", "intermediate traders", "advanced traders", "professional traders"],
-        # 交易风格互斥组
-        ["day traders", "swing traders", "scalpers"],
-        # 投资者类型互斥组
-        ["long term investors", "hodlers"],
-        # 资金规模互斥组
-        ["retail crypto traders", "high net worth traders", "whales", "institutional investors"],
-    ]
+    AUDIENCE_MUTUAL_EXCLUSION_GROUPS: List[List[str]] = []  # 占位符，实际值在模块加载时初始化
     
-    # 标签推理阈值
-    TAG_THRESHOLD_BASE = 0.30    # 基础阈值
-    TAG_THRESHOLD_RATIO = 0.65   # 相对最高相似度的比例
+    # 标签推理阈值（已迁移到 core.business_rules 模块）
+    TAG_THRESHOLD_BASE = 0.30    # 基础阈值（保留作为常量）
+    TAG_THRESHOLD_RATIO = 0.65   # 相对最高相似度的比例（保留作为常量）
     
     # 候选频道收集配置
     CANDIDATE_COLLECTION = {
@@ -827,4 +526,57 @@ class Config:
         # 降级到默认 key
         logger.debug("未找到实时搜索专用API Key，使用默认API Key")
         return Config.load_api_key()
+    
+    # ==================== 业务规则类属性初始化（向后兼容） ====================
+    # 注意：业务规则已迁移到 core.business_rules 模块
+    # 以下类属性在模块加载时从业务规则模块初始化，保持向后兼容
+    # 如需修改业务规则，请编辑 core/business_rules.py 并重新加载模块
+
+
+# 在模块加载时初始化业务规则类属性（保持向后兼容）
+def _init_business_rules_from_module():
+    """从业务规则模块初始化Config类的业务规则属性"""
+    try:
+        from core.business_rules import get_business_rules
+        rules = get_business_rules()
+        
+        # 初始化Topics和Audience相关属性
+        Config.TOPIC_LABELS = rules.topics.labels
+        Config.AUDIENCE_LABELS = rules.audience.labels
+        Config.CORE_TOPIC_LABELS = rules.topics.core_labels
+        Config.CORE_AUDIENCE_LABELS = rules.audience.core_labels
+        Config.TOPIC_MUTUAL_EXCLUSION_GROUPS = rules.topics.mutual_exclusion_groups
+        Config.AUDIENCE_MUTUAL_EXCLUSION_GROUPS = rules.audience.mutual_exclusion_groups
+        
+        # 初始化BD模式相关属性
+        Config.BD_CONTRACT_TOPICS = rules.bd_rules.contract_topics
+        Config.BD_EXCLUDED_TOPICS = rules.bd_rules.excluded_topics
+        Config.BD_AUDIENCE_LABELS = rules.bd_rules.audience_labels
+        Config.BD_CONTENT_TYPE_LABELS = rules.bd_rules.content_type_labels
+        Config.COMPETITOR_EXCHANGES = rules.bd_rules.competitor_exchanges
+        Config.BD_COLLAB_KEYWORDS = rules.bd_rules.collab_keywords
+        Config.BD_SIMILARITY_WEIGHTS = rules.bd_rules.similarity_weights
+        Config.BD_TOPIC_WEIGHTS = rules.bd_rules.topic_weights
+        Config.BD_AUDIENCE_WEIGHTS = rules.bd_rules.audience_weights
+        Config.BD_ENGAGEMENT_THRESHOLDS = rules.bd_rules.engagement_thresholds
+        Config.BD_PRIORITY_THRESHOLDS = rules.bd_rules.priority_thresholds
+        Config.BD_AUTO_SAVE = rules.bd_rules.auto_save
+        
+        # 初始化相似度和标签推理相关属性
+        Config.SIMILARITY_WEIGHTS = rules.similarity.weights
+        Config.TAG_INFERENCE = {
+            "max_topics": rules.tag_inference.max_topics,
+            "max_audience": rules.tag_inference.max_audience,
+            "core_threshold": rules.tag_inference.core_threshold,
+            "extended_threshold": rules.tag_inference.extended_threshold,
+            "enable_mutual_exclusion": rules.tag_inference.enable_mutual_exclusion,
+        }
+    except Exception as e:
+        # 如果加载失败，使用原有的类属性定义（向后兼容）
+        logger = Config._get_logger()
+        logger.warning(f"从业务规则模块加载失败，使用默认配置: {e}")
+
+
+# 执行初始化
+_init_business_rules_from_module()
 

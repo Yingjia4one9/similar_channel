@@ -225,17 +225,21 @@
         toast.className = `toast ${type}`;
         
         const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : 'ℹ️';
-        toast.innerHTML = `<span>${icon}</span><span>${escapeHtml(message)}</span>`;
+        // 错误类型添加关闭按钮
+        const closeButton = type === 'error' ? '<button class="toast-close" onclick="this.parentElement.remove()" title="关闭">×</button>' : '';
+        toast.innerHTML = `<span>${icon}</span><span>${escapeHtml(message)}</span>${closeButton}`;
         
         container.appendChild(toast);
         
-        // 自动移除
-        setTimeout(() => {
-          toast.classList.add('fade-out');
-          toast.addEventListener('animationend', () => {
-            toast.remove();
-          });
-        }, 3000);
+        // 只有非错误类型才自动移除，错误类型需要手动关闭
+        if (type !== 'error') {
+          setTimeout(() => {
+            toast.classList.add('fade-out');
+            toast.addEventListener('animationend', () => {
+              toast.remove();
+            });
+          }, 3000);
+        }
       }
 
       // 渲染骨架屏

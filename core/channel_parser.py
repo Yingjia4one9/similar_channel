@@ -19,7 +19,7 @@ ALLOWED_DOMAINS = {
 }
 
 
-def get_channel_id_by_handle(handle: str, use_for: str | None = None) -> str:
+async def get_channel_id_by_handle(handle: str, use_for: str | None = None) -> str:
     """
     通过新样式 handle（@xxx）获取频道 ID。
     
@@ -34,7 +34,7 @@ def get_channel_id_by_handle(handle: str, use_for: str | None = None) -> str:
         ValueError: 如果找不到对应的频道
     """
     handle = handle.lstrip("@")
-    data = yt_get(
+    data = await yt_get(
         "channels",
         {
             "part": "id",
@@ -49,7 +49,7 @@ def get_channel_id_by_handle(handle: str, use_for: str | None = None) -> str:
     return items[0]["id"]
 
 
-def get_channel_id_by_username(username: str, use_for: str | None = None) -> str:
+async def get_channel_id_by_username(username: str, use_for: str | None = None) -> str:
     """
     通过 legacy username（/user/xxx）获取频道 ID。
     
@@ -63,7 +63,7 @@ def get_channel_id_by_username(username: str, use_for: str | None = None) -> str
     Raises:
         ValueError: 如果找不到对应的频道
     """
-    data = yt_get(
+    data = await yt_get(
         "channels",
         {
             "part": "id",
@@ -78,7 +78,7 @@ def get_channel_id_by_username(username: str, use_for: str | None = None) -> str
     return items[0]["id"]
 
 
-def get_channel_id_by_custom_url_segment(segment: str, use_for: str | None = None) -> str:
+async def get_channel_id_by_custom_url_segment(segment: str, use_for: str | None = None) -> str:
     """
     对于 /c/xxx 或根路径 /xxx，YouTube API 没有直接参数，
     这里通过搜索频道名称的方式近似匹配。
@@ -93,7 +93,7 @@ def get_channel_id_by_custom_url_segment(segment: str, use_for: str | None = Non
     Raises:
         ValueError: 如果找不到对应的频道
     """
-    data = yt_get(
+    data = await yt_get(
         "search",
         {
             "part": "snippet",
@@ -111,7 +111,7 @@ def get_channel_id_by_custom_url_segment(segment: str, use_for: str | None = Non
     return items[0]["snippet"]["channelId"]
 
 
-def get_channel_id_by_video_id(video_id: str, use_for: str | None = None) -> str:
+async def get_channel_id_by_video_id(video_id: str, use_for: str | None = None) -> str:
     """
     通过视频 ID 获取频道 ID。
     
@@ -125,7 +125,7 @@ def get_channel_id_by_video_id(video_id: str, use_for: str | None = None) -> str
     Raises:
         ValueError: 如果找不到对应的频道
     """
-    data = yt_get(
+    data = await yt_get(
         "videos",
         {
             "part": "snippet",
@@ -140,7 +140,7 @@ def get_channel_id_by_video_id(video_id: str, use_for: str | None = None) -> str
     return items[0]["snippet"]["channelId"]
 
 
-def extract_channel_id_from_url(url: str, use_for: str | None = None) -> str:
+async def extract_channel_id_from_url(url: str, use_for: str | None = None) -> str:
     """
     支持多种常见频道 / 视频链接形式：
     - https://www.youtube.com/channel/CHANNEL_ID
@@ -209,7 +209,7 @@ def extract_channel_id_from_url(url: str, use_for: str | None = None) -> str:
     if parsed.netloc in {"youtu.be"} and path:
         video_id = path.lstrip("/")
         if video_id:
-            return get_channel_id_by_video_id(video_id, use_for=use_for)
+            return await get_channel_id_by_video_id(video_id, use_for=use_for)
 
     # /channel/CHANNEL_ID
     m = re.match(r"^/channel/([a-zA-Z0-9_-]+)", path)
@@ -220,19 +220,19 @@ def extract_channel_id_from_url(url: str, use_for: str | None = None) -> str:
     m = re.match(r"^/@([a-zA-Z0-9._-]+)", path)
     if m:
         handle = m.group(1)
-        return get_channel_id_by_handle(handle, use_for=use_for)
+        return await get_channel_id_by_handle(handle, use_for=use_for)
 
     # legacy username: /user/xxx
     m = re.match(r"^/user/([a-zA-Z0-9._-]+)", path)
     if m:
         username = m.group(1)
-        return get_channel_id_by_username(username, use_for=use_for)
+        return await get_channel_id_by_username(username, use_for=use_for)
 
     # custom url: /c/xxx
     m = re.match(r"^/c/([^/]+)", path)
     if m:
         segment = m.group(1)
-        return get_channel_id_by_custom_url_segment(segment, use_for=use_for)
+        return await get_channel_id_by_custom_url_segment(segment, use_for=use_for)
 
     # watch 链接，解析 v=VIDEO_ID，再通过 video 查 channelId
     if "watch" in path:
@@ -240,12 +240,12 @@ def extract_channel_id_from_url(url: str, use_for: str | None = None) -> str:
         video_id_list = qs.get("v")
         if video_id_list:
             video_id = video_id_list[0]
-            return get_channel_id_by_video_id(video_id, use_for=use_for)
+            return await get_channel_id_by_video_id(video_id, use_for=use_for)
 
     # 根路径 /xxx 形式，尝试按自定义路径匹配
     root_segment = path.strip("/")
     if root_segment:
-        return get_channel_id_by_custom_url_segment(root_segment, use_for=use_for)
+        return await get_channel_id_by_custom_url_segment(root_segment, use_for=use_for)
 
     raise ValueError("暂时无法从该链接解析出频道 ID，请提供频道主页或任意视频链接。")
 

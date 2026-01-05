@@ -11,7 +11,7 @@ from core.youtube_api import YouTubeAPIError, YouTubeQuotaExceededError, yt_get
 logger = get_logger()
 
 
-def collect_candidate_channels_from_related_videos(
+async def collect_candidate_channels_from_related_videos(
     video_ids: List[str], per_video: int | None = None, limit: int | None = None, use_for: str | None = None
 ) -> List[str]:
     """
@@ -41,7 +41,7 @@ def collect_candidate_channels_from_related_videos(
         if len(candidate_channel_ids) >= limit:
             break
         try:
-            data = yt_get(
+            data = await yt_get(
                 "search",
                 {
                     "part": "snippet",
@@ -97,7 +97,7 @@ def collect_candidate_channels_from_related_videos(
     return candidate_channel_ids
 
 
-def search_candidate_channels_by_title(title: str, limit: int | None = None, use_for: str | None = None) -> List[str]:
+async def search_candidate_channels_by_title(title: str, limit: int | None = None, use_for: str | None = None) -> List[str]:
     """
     备用方案：根据频道标题做一次全局搜索，收集频道候选。
     当基于 relatedToVideoId 的方式因为某些特殊视频而报错时，用这个方式兜底。
@@ -112,7 +112,7 @@ def search_candidate_channels_by_title(title: str, limit: int | None = None, use
     """
     limit = limit or Config.CANDIDATE_COLLECTION["title_search_limit"]
     try:
-        data = yt_get(
+        data = await yt_get(
             "search",
             {
                 "part": "snippet",

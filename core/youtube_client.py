@@ -2,6 +2,7 @@
 YouTube 相似频道查找主模块
 提供高层 API，整合各个功能模块
 """
+import asyncio
 import concurrent.futures
 import json
 from typing import Any, Callable, Dict, List, Tuple
@@ -28,10 +29,17 @@ from infrastructure.database import (
     get_channel_info_from_local_db,
     get_embeddings_from_local_db,
     get_single_channel_info_from_local_db,
+    get_single_channel_info_from_local_db_with_age_check,
+    # 异步版本（如果可用）
+    get_channel_info_from_local_db_async,
+    get_embeddings_from_local_db_async,
+    get_candidates_from_local_index_async,
+    AIOSQLITE_AVAILABLE,
 )
 from core.embedding import (
     cosine_similarity,
     ensure_label_embeddings,
+    encode_async,
     get_embed_model,
     infer_topics_and_audience,
 )
@@ -42,6 +50,7 @@ from core.similarity import (
 )
 from infrastructure.logger import get_logger
 from infrastructure.utils import build_text_for_channel, extract_emails_from_text
+from infrastructure.validation import validate_search_request
 from core.youtube_api import YouTubeQuotaExceededError
 from infrastructure.quota_tracker import record_fallback_usage
 from core.bd_scoring import calculate_full_bd_metrics
@@ -62,59 +71,13 @@ __all__ = ["get_similar_channels_by_url", "YouTubeQuotaExceededError"]
 
 # ==================== 重构后的辅助函数（CP-y6-03：函数职责单一） ====================
 
-def _validate_search_params(
-    channel_url: str,
-    max_results: int,
-    min_subscribers: int | None,
-    max_subscribers: int | None,
-    min_similarity: float | None,
-) -> str:
-    """
-    验证搜索参数
-    
-    Args:
-        channel_url: 频道链接
-        max_results: 最大结果数
-        min_subscribers: 最小订阅数
-        max_subscribers: 最大订阅数
-        min_similarity: 最低相似度
-    
-    Returns:
-        清理后的频道链接
-    
-    Raises:
-        ValueError: 如果参数无效
-    """
-    if not channel_url or not isinstance(channel_url, str) or not channel_url.strip():
-        raise ValueError("频道链接不能为空")
-    
-    channel_url = channel_url.strip()
-    
-    if max_results < 1 or max_results > 200:
-        raise ValueError("max_results 必须在 1-200 之间")
-    
-    if min_subscribers is not None and min_subscribers < 0:
-        raise ValueError("min_subscribers 不能为负数")
-    
-    if max_subscribers is not None and max_subscribers < 0:
-        raise ValueError("max_subscribers 不能为负数")
-    
-    if min_subscribers is not None and max_subscribers is not None:
-        if min_subscribers > max_subscribers:
-            raise ValueError("min_subscribers 不能大于 max_subscribers")
-    
-    if min_similarity is not None and (min_similarity < 0 or min_similarity > 1):
-        raise ValueError("min_similarity 必须在 0-1 之间")
-    
-    return channel_url
 
-
-def _get_base_channel_info(
+async def _get_base_channel_info(
     channel_id: str,
     report_progress: Callable[[float, str], None],
 ) -> Dict[str, Any]:
     """
-    获取基频道信息（带降级策略）
+    获取基频道信息（优先使用本地数据库，避免浪费配额）
     
     Args:
         channel_id: 频道ID
@@ -127,20 +90,38 @@ def _get_base_channel_info(
         ValueError: 如果无法获取频道信息
     """
     report_progress(10, "正在获取频道基础信息...")
+    
+    # 优化：优先从本地数据库获取基频道信息（如果数据未过期）
+    # 这样可以避免浪费API配额
+    max_age_days = Config.get_config_value("channel_info.max_age_days", 60)
+    
+    # 先尝试从本地数据库获取（带过期检查）
+    local_base_info = get_single_channel_info_from_local_db_with_age_check(
+        channel_id, max_age_days=max_age_days
+    )
+    
+    if local_base_info:
+        logger.info(f"从本地数据库获取基频道信息: {channel_id}（节省API配额）")
+        return local_base_info
+    
+    # 本地数据库中没有或已过期，调用API获取
     try:
-        base_info = get_channel_basic_info(channel_id, use_for="search")
+        base_info = await get_channel_basic_info(channel_id, use_for="search")
+        logger.debug(f"通过API获取基频道信息: {channel_id}")
+        return base_info
     except YouTubeQuotaExceededError:
-        logger.warning(f"API配额用尽，尝试从本地数据库读取频道信息: {channel_id}")
+        logger.warning(f"API配额用尽，尝试从本地数据库读取频道信息（即使已过期）: {channel_id}")
+        # 配额用尽时，即使数据过期也尝试使用
         local_base_info = get_single_channel_info_from_local_db(channel_id)
         if local_base_info:
-            logger.info(f"成功从本地数据库获取频道信息: {channel_id}")
-            base_info = local_base_info
+            logger.info(f"成功从本地数据库获取频道信息（数据可能已过期）: {channel_id}")
             record_fallback_usage(
                 fallback_type="local_db_channel_info",
                 endpoint="channels",
                 context=f"channel_id={channel_id}",
                 success=True,
             )
+            return local_base_info
         else:
             record_fallback_usage(
                 fallback_type="local_db_channel_info",
@@ -155,11 +136,9 @@ def _get_base_channel_info(
                 "2. 使用 build_channel_index.py 预先建立频道索引\n"
                 "3. 或申请更高的API配额"
             )
-    
-    return base_info
 
 
-def _enrich_base_channel_info(
+async def _enrich_base_channel_info(
     base_info: Dict[str, Any],
     channel_id: str,
     report_progress: Callable[[float, str], None],
@@ -176,7 +155,7 @@ def _enrich_base_channel_info(
     base_recent_videos: List[Dict[str, Any]] = []
     try:
         # 获取基频道的最近视频（用于显示和相似度计算）
-        base_recent_videos = get_recent_video_snippets_for_channel(
+        base_recent_videos = await get_recent_video_snippets_for_channel(
             channel_id, max_results=Config.CHANNEL_INFO["recent_videos_count"], use_for="search"
         )
         base_info["recent_videos"] = base_recent_videos
@@ -205,7 +184,7 @@ def _enrich_base_channel_info(
     base_info["emails"] = list(dict.fromkeys(base_emails)) if base_emails else []
 
 
-def _compute_base_channel_embedding(
+async def _compute_base_channel_embedding(
     base_info: Dict[str, Any],
     report_progress: Callable[[float, str], None],
 ) -> tuple[np.ndarray, Dict[str, Any]]:
@@ -230,7 +209,8 @@ def _compute_base_channel_embedding(
     if not base_text:
         raise ValueError("无法构建频道文本特征，频道信息可能不完整")
     
-    base_vec = model.encode([base_text], convert_to_numpy=True)
+    # 使用异步编码，避免阻塞事件循环
+    base_vec = await encode_async([base_text])
     if base_vec is None or len(base_vec) == 0:
         raise ValueError("无法生成频道向量")
     
@@ -250,7 +230,7 @@ def _compute_base_channel_embedding(
     return base_vec[0], base_tags
 
 
-def _collect_candidate_channels(
+async def _collect_candidate_channels(
     base_vec: np.ndarray,
     base_info: Dict[str, Any],
     base_tags: Dict[str, Any],
@@ -277,9 +257,22 @@ def _collect_candidate_channels(
     
     # 1. 从本地索引获取候选
     report_progress(25, "正在从本地索引搜索候选频道...")
-    local_ids = get_candidates_from_local_index(
-        base_vec, max_candidates=Config.CANDIDATE_COLLECTION["local_index_max"]
-    )
+    # 使用异步版本进行向量搜索，避免阻塞事件循环
+    try:
+        from infrastructure.database import get_candidates_from_local_index_async, AIOSQLITE_AVAILABLE
+        if AIOSQLITE_AVAILABLE:
+            local_ids = await get_candidates_from_local_index_async(
+                base_vec, max_candidates=Config.CANDIDATE_COLLECTION["local_index_max"]
+            )
+        else:
+            local_ids = get_candidates_from_local_index(
+                base_vec, max_candidates=Config.CANDIDATE_COLLECTION["local_index_max"]
+            )
+    except Exception as e:
+        logger.warning(f"使用异步向量搜索失败，回退到同步版本: {e}")
+        local_ids = get_candidates_from_local_index(
+            base_vec, max_candidates=Config.CANDIDATE_COLLECTION["local_index_max"]
+        )
     candidate_ids.extend(local_ids)
     
     # 2. 从相关视频获取候选
@@ -303,7 +296,7 @@ def _collect_candidate_channels(
         # 从5个视频减少到3个，可以节省约40%的配额
         videos_for_search = recent_videos[:Config.CHANNEL_INFO["recent_videos_for_similarity"]]
         if videos_for_search:
-            related_ids = collect_candidate_channels_from_related_videos(
+            related_ids = await collect_candidate_channels_from_related_videos(
                 videos_for_search,
                 per_video=Config.CANDIDATE_COLLECTION["related_videos_per_video"],
                 limit=Config.CANDIDATE_COLLECTION["related_videos_limit"],
@@ -326,7 +319,7 @@ def _collect_candidate_channels(
     # 3. 按标题搜索
     report_progress(35, "正在按标题搜索相似频道...")
     try:
-        title_based_ids = search_candidate_channels_by_title(
+        title_based_ids = await search_candidate_channels_by_title(
             base_info.get("title", ""), limit=Config.CANDIDATE_COLLECTION["title_search_limit"], use_for="search"
         )
         candidate_ids.extend(title_based_ids)
@@ -344,10 +337,10 @@ def _collect_candidate_channels(
     # 4. 按主题和受众搜索
     report_progress(40, "正在按主题和受众搜索相似频道...")
     
-    def search_topic(topic: str) -> List[str]:
+    async def search_topic(topic: str) -> List[str]:
         """搜索单个主题"""
         try:
-            return search_candidate_channels_by_title(
+            return await search_candidate_channels_by_title(
                 topic, limit=Config.CANDIDATE_COLLECTION["topic_search_limit"], use_for="search"
             )
         except YouTubeQuotaExceededError:
@@ -363,11 +356,11 @@ def _collect_candidate_channels(
             logger.debug(f"搜索主题 '{topic}' 失败: {e}")
             return []
     
-    def search_audience(audience: str) -> List[str]:
+    async def search_audience(audience: str) -> List[str]:
         """搜索单个受众"""
         try:
             search_query = f"{audience} crypto" if "crypto" not in audience.lower() else audience
-            return search_candidate_channels_by_title(
+            return await search_candidate_channels_by_title(
                 search_query, limit=Config.CANDIDATE_COLLECTION["audience_search_limit"], use_for="search"
             )
         except YouTubeQuotaExceededError:
@@ -383,36 +376,32 @@ def _collect_candidate_channels(
             logger.debug(f"搜索受众 '{audience}' 失败: {e}")
             return []
     
-    # 并发执行主题和受众搜索
+    # 并发执行主题和受众搜索（使用 asyncio.gather 实现异步并发）
     topic_based_ids: List[str] = []
     audience_based_ids: List[str] = []
     
-    search_workers = Config.get_thread_pool_size("search_workers", Config.CONCURRENT_PROCESSING["search_workers"])
-    with concurrent.futures.ThreadPoolExecutor(max_workers=search_workers) as executor:
-        topic_futures = {
-            executor.submit(search_topic, topic): topic 
-            for topic in base_tags.get("topics", [])
-        }
-        audience_futures = {
-            executor.submit(search_audience, audience): audience 
-            for audience in base_tags.get("audience", [])
-        }
-        
-        for future in concurrent.futures.as_completed(topic_futures):
-            try:
-                topic_ids = future.result()
-                topic_based_ids.extend(topic_ids)
-            except Exception as e:
-                topic = topic_futures.get(future, "unknown")
-                logger.debug(f"获取主题 '{topic}' 搜索结果时发生异常: {e}")
-        
-        for future in concurrent.futures.as_completed(audience_futures):
-            try:
-                aud_ids = future.result()
-                audience_based_ids.extend(aud_ids)
-            except Exception as e:
-                audience = audience_futures.get(future, "unknown")
-                logger.debug(f"获取受众 '{audience}' 搜索结果时发生异常: {e}")
+    # 使用 asyncio.gather 并发执行所有搜索任务
+    topic_tasks = [search_topic(topic) for topic in base_tags.get("topics", [])]
+    audience_tasks = [search_audience(audience) for audience in base_tags.get("audience", [])]
+    
+    # 并发执行所有任务
+    all_results = await asyncio.gather(*topic_tasks, *audience_tasks, return_exceptions=True)
+    
+    # 处理主题搜索结果
+    for i, result in enumerate(all_results[:len(topic_tasks)]):
+        if isinstance(result, Exception):
+            topic = base_tags.get("topics", [])[i] if i < len(base_tags.get("topics", [])) else "unknown"
+            logger.debug(f"获取主题 '{topic}' 搜索结果时发生异常: {result}")
+        else:
+            topic_based_ids.extend(result)
+    
+    # 处理受众搜索结果
+    for i, result in enumerate(all_results[len(topic_tasks):]):
+        if isinstance(result, Exception):
+            audience = base_tags.get("audience", [])[i] if i < len(base_tags.get("audience", [])) else "unknown"
+            logger.debug(f"获取受众 '{audience}' 搜索结果时发生异常: {result}")
+        else:
+            audience_based_ids.extend(result)
     
     candidate_ids.extend(topic_based_ids)
     candidate_ids.extend(audience_based_ids)
@@ -436,7 +425,7 @@ def _collect_candidate_channels(
     return candidate_ids
 
 
-def _save_channels_to_db(
+def _save_channels_to_db_sync(
     base_info: Dict[str, Any],
     base_vec: np.ndarray,
     candidate_infos: List[Dict[str, Any]],
@@ -445,15 +434,16 @@ def _save_channels_to_db(
     bd_mode: bool = False,
 ) -> None:
     """
-    将搜索过程中获取的频道信息保存到本地数据库。
+    同步版本的数据库保存函数，用于 BackgroundTasks。
+    这个函数在请求响应后执行，不阻塞用户请求。
     
     Args:
         base_info: 基频道信息
         base_vec: 基频道向量
         candidate_infos: 候选频道信息列表
         cand_vecs_list: 候选频道向量列表
-        tags_list: 候选频道标签列表
-        bd_mode: 是否启用BD模式（影响保存策略）
+        tags_list: 标签列表
+        bd_mode: 是否为 BD 模式
     """
     if not DB_SAVE_AVAILABLE:
         return
@@ -555,6 +545,8 @@ def _save_channels_to_db(
             if vec is None:
                 try:
                     text = build_text_for_channel(info_with_tags)
+                    # 在同步函数中，直接使用同步编码（BackgroundTasks 在请求完成后执行）
+                    from core.embedding import get_embed_model
                     model = get_embed_model()
                     vec = model.encode([text], convert_to_numpy=True)[0]
                 except Exception as e:
@@ -696,10 +688,14 @@ async def get_similar_channels_by_url(
     Raises:
         ValueError: 如果输入参数无效
     """
-    # 参数验证
-    channel_url = _validate_search_params(
-        channel_url, max_results, min_subscribers, max_subscribers, min_similarity
+    # 参数验证（使用统一的验证函数）
+    is_valid, error_msg = validate_search_request(
+        channel_url, max_results, min_subscribers, max_subscribers,
+        None, None, min_similarity
     )
+    if not is_valid:
+        raise ValueError(error_msg or "参数验证失败")
+    channel_url = channel_url.strip()
     
     def _report_progress(progress: float, message: str) -> None:
         """报告进度（内部辅助函数）"""
@@ -710,17 +706,17 @@ async def get_similar_channels_by_url(
     
     # 1. 解析频道链接
     _report_progress(5, "正在解析频道链接...")
-    channel_id = extract_channel_id_from_url(channel_url, use_for="search")
+    channel_id = await extract_channel_id_from_url(channel_url, use_for="search")
     
     # 2. 获取并丰富基频道信息
-    base_info = _get_base_channel_info(channel_id, _report_progress)
-    _enrich_base_channel_info(base_info, channel_id, _report_progress)
+    base_info = await _get_base_channel_info(channel_id, _report_progress)
+    await _enrich_base_channel_info(base_info, channel_id, _report_progress)
     
     # 3. 计算基频道向量和标签
-    base_vec, base_tags = _compute_base_channel_embedding(base_info, _report_progress)
+    base_vec, base_tags = await _compute_base_channel_embedding(base_info, _report_progress)
 
     # 4. 收集候选频道
-    candidate_ids = _collect_candidate_channels(
+    candidate_ids = await _collect_candidate_channels(
         base_vec, base_info, base_tags, channel_id, _report_progress
     )
 
@@ -739,11 +735,28 @@ async def get_similar_channels_by_url(
     # 3. 优化：优先从本地数据库获取频道信息，进行粗筛，只对缺失的调用API
     # 从本地数据库获取频道信息，如果数据过期则自动在后台更新（CP-y4-02）
     # 统一使用60天更新周期，减少API消耗
-    local_infos = get_channel_info_from_local_db(
-        candidate_ids, 
-        max_age_days=60,
-        auto_update_expired=True  # 启用自动更新过期数据
-    )
+    # 使用异步版本以非阻塞方式获取数据
+    try:
+        from infrastructure.database import get_channel_info_from_local_db_async, AIOSQLITE_AVAILABLE
+        if AIOSQLITE_AVAILABLE:
+            local_infos = await get_channel_info_from_local_db_async(
+                candidate_ids, 
+                max_age_days=60,
+                auto_update_expired=True  # 启用自动更新过期数据
+            )
+        else:
+            local_infos = get_channel_info_from_local_db(
+                candidate_ids, 
+                max_age_days=60,
+                auto_update_expired=True  # 启用自动更新过期数据
+            )
+    except Exception as e:
+        logger.warning(f"使用异步数据库查询失败，回退到同步版本: {e}")
+        local_infos = get_channel_info_from_local_db(
+            candidate_ids, 
+            max_age_days=60,
+            auto_update_expired=True  # 启用自动更新过期数据
+        )
     
     # 粗筛：使用本地数据库信息进行初步筛选（如果可用）
     # 这样可以在调用API前过滤掉明显不符合条件的候选
@@ -792,7 +805,7 @@ async def get_similar_channels_by_url(
                     try:
                         import json
                         topics = json.loads(topics)
-                    except:
+                    except (json.JSONDecodeError, TypeError):
                         topics = []
                 if not isinstance(topics, list):
                     topics = []
@@ -819,6 +832,8 @@ async def get_similar_channels_by_url(
         
         local_infos = filtered_local_infos
     
+    # 过滤掉没有 channelId 的项，避免 KeyError
+    local_infos = [info for info in local_infos if info.get("channelId")]
     local_info_map = {info["channelId"]: info for info in local_infos}
     local_channel_ids = set(local_info_map.keys())
     
@@ -829,7 +844,7 @@ async def get_similar_channels_by_url(
     if missing_ids:
         _report_progress(52, f"正在从API获取 {len(missing_ids)} 个缺失频道的信息...")
         try:
-            api_infos = batch_get_channels_info(missing_ids, use_for="search")
+            api_infos = await batch_get_channels_info(missing_ids, use_for="search")
             candidate_infos.extend(api_infos)
         except YouTubeQuotaExceededError:
             logger.warning(f"批量获取频道信息时配额用尽，记录 {len(missing_ids)} 个频道的链接")
@@ -868,6 +883,8 @@ async def get_similar_channels_by_url(
     candidate_infos.extend(local_infos)
     
     # 按原始顺序重新排序（保持优先级）
+    # 过滤掉没有 channelId 的项，避免 KeyError
+    candidate_infos = [info for info in candidate_infos if info.get("channelId")]
     candidate_id_map = {info["channelId"]: info for info in candidate_infos}
     candidate_infos = [candidate_id_map[cid] for cid in candidate_ids if cid in candidate_id_map]
     
@@ -877,16 +894,16 @@ async def get_similar_channels_by_url(
     _report_progress(60, "正在并行获取候选频道的最近视频...")
     # 优化：并行获取最近视频，提高效率
     
-    def fetch_videos_and_emails(info: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]], List[str], str | None]:
+    async def fetch_videos_and_emails(info: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]], List[str], str | None]:
         """
-        获取单个频道的最近视频和邮箱
+        获取单个频道的最近视频和邮箱（异步版本）
         
         Returns:
             (channel_id, recent_videos, emails, error_message) 元组
         """
         cid = info.get("channelId", "")
         try:
-            recent_v = get_recent_video_snippets_for_channel(
+            recent_v = await get_recent_video_snippets_for_channel(
                 cid, max_results=Config.CHANNEL_INFO["recent_videos_for_similarity"], use_for="search"
             )
             # 提取邮箱：从频道描述和视频描述中提取
@@ -915,58 +932,55 @@ async def get_similar_channels_by_url(
             logger.debug(f"获取频道 {cid} 的视频信息失败: {e}", exc_info=True)
             return (cid, [], [], str(e))
     
-    # 并行获取最近视频
+    # 并行获取最近视频（使用异步并发）
     total_candidates = len(candidate_infos)
     videos_and_emails_map: Dict[str, tuple[List[Dict[str, Any]], List[str]]] = {}
     failed_channels: List[Dict[str, str]] = []  # 记录失败的频道及其原因
     
-    # 使用配置化的线程池大小
-    video_fetch_workers = Config.get_thread_pool_size("video_fetch_workers", Config.CONCURRENT_PROCESSING["video_fetch_workers"])
-    with concurrent.futures.ThreadPoolExecutor(max_workers=video_fetch_workers) as executor:
-        future_to_cid = {
-            executor.submit(fetch_videos_and_emails, info): info.get("channelId", "")
-            for info in candidate_infos
-        }
+    # 使用 asyncio.gather 并发执行所有任务
+    tasks = [fetch_videos_and_emails(info) for info in candidate_infos]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # 处理结果
+    for i, result in enumerate(results):
+        completed = i + 1
+        if completed % 20 == 0:
+            _report_progress(60 + int(10 * completed / total_candidates), f"正在处理候选频道 {completed}/{total_candidates}...")
         
-        completed = 0
-        for future in concurrent.futures.as_completed(future_to_cid):
-            completed += 1
-            if completed % 20 == 0:
-                _report_progress(60 + int(10 * completed / total_candidates), f"正在处理候选频道 {completed}/{total_candidates}...")
-            try:
-                result = future.result()
-                if not result or len(result) != 4:
-                    cid = future_to_cid.get(future, "unknown")
-                    failed_channels.append({
-                        "channelId": cid,
-                        "channelUrl": f"https://www.youtube.com/channel/{cid}" if cid != "unknown" else "",
-                        "reason": "返回格式无效"
-                    })
-                    logger.warning(f"获取频道信息返回格式无效: {result}")
-                    continue
-                
-                cid, recent_v, emails, error_msg = result
-                if cid and isinstance(cid, str):
-                    if error_msg:
-                        failed_channels.append({
-                            "channelId": cid,
-                            "channelUrl": f"https://www.youtube.com/channel/{cid}",
-                            "reason": error_msg
-                        })
-                        logger.debug(f"频道 {cid} 的视频获取失败: {error_msg}")
-                    # 确保recent_v和emails不为None
-                    videos_and_emails_map[cid] = (
-                        recent_v if recent_v is not None else [],
-                        emails if emails is not None else []
-                    )
-            except Exception as e:
-                cid = future_to_cid.get(future, "unknown")
+        if isinstance(result, Exception):
+            cid = candidate_infos[i].get("channelId", "unknown")
+            failed_channels.append({
+                "channelId": cid,
+                "channelUrl": f"https://www.youtube.com/channel/{cid}" if cid != "unknown" else "",
+                "reason": f"异常: {type(result).__name__}: {str(result)}"
+            })
+            logger.warning(f"获取频道 {cid} 信息时发生异常: {result}", exc_info=True)
+            continue
+        
+        if not result or len(result) != 4:
+            cid = candidate_infos[i].get("channelId", "unknown")
+            failed_channels.append({
+                "channelId": cid,
+                "channelUrl": f"https://www.youtube.com/channel/{cid}" if cid != "unknown" else "",
+                "reason": "返回格式无效"
+            })
+            logger.warning(f"获取频道信息返回格式无效: {result}")
+            continue
+        
+        cid, recent_v, emails, error_msg = result
+        if cid and isinstance(cid, str):
+            if error_msg:
                 failed_channels.append({
                     "channelId": cid,
-                    "channelUrl": f"https://www.youtube.com/channel/{cid}" if cid != "unknown" else "",
-                    "reason": f"异常: {type(e).__name__}: {str(e)}"
+                    "channelUrl": f"https://www.youtube.com/channel/{cid}",
+                    "reason": error_msg
                 })
-                logger.warning(f"获取频道 {cid} 信息时发生异常: {e}", exc_info=True)
+                logger.debug(f"频道 {cid} 的视频获取失败: {error_msg}")
+            # 确保recent_v和emails不为None
+            videos_and_emails_map[cid] = (
+                recent_v if recent_v is not None else [],
+                emails if emails is not None else []
+            )
     
     # 记录失败的频道数量（如果较多）
     if len(failed_channels) > 0:
@@ -1007,7 +1021,19 @@ async def get_similar_channels_by_url(
 
     _report_progress(70, "正在计算相似度...")
     # 4. 优化：优先复用本地数据库中的向量，只计算新频道的向量
-    local_embeddings = get_embeddings_from_local_db([info["channelId"] for info in candidate_infos])
+    # 使用异步版本以非阻塞方式获取向量
+    try:
+        from infrastructure.database import get_embeddings_from_local_db_async, AIOSQLITE_AVAILABLE
+        # 过滤掉没有 channelId 的项，避免 KeyError
+        candidate_ids_for_embedding = [info.get("channelId") for info in candidate_infos if info.get("channelId")]
+        if AIOSQLITE_AVAILABLE:
+            local_embeddings = await get_embeddings_from_local_db_async(candidate_ids_for_embedding)
+        else:
+            local_embeddings = get_embeddings_from_local_db(candidate_ids_for_embedding)
+    except Exception as e:
+        logger.warning(f"使用异步数据库查询向量失败，回退到同步版本: {e}")
+        candidate_ids_for_embedding = [info.get("channelId") for info in candidate_infos if info.get("channelId")]
+        local_embeddings = get_embeddings_from_local_db(candidate_ids_for_embedding)
     
     # 分离需要计算向量的频道和已有向量的频道
     texts_to_encode: List[str] = []
@@ -1022,6 +1048,8 @@ async def get_similar_channels_by_url(
     # 批量计算新频道的向量（分批处理以避免内存不足）
     new_vecs: Dict[int, np.ndarray] = {}
     if texts_to_encode:
+        # 获取嵌入模型
+        model = get_embed_model()
         # 使用配置的批量大小，避免一次性处理太多导致内存不足
         embedding_batch_size = Config.get_config_value("embedding.batch_size", Config.EMBEDDING_BATCH_SIZE)
         # 如果批量大小太大，限制为更小的值（内存优化）
@@ -1033,7 +1061,8 @@ async def get_similar_channels_by_url(
             batch_indices = indices_to_encode[batch_start:batch_end]
             
             try:
-                encoded_vecs = model.encode(batch_texts, convert_to_numpy=True, show_progress_bar=False)
+                # 使用异步编码，避免阻塞事件循环
+                encoded_vecs = await encode_async(batch_texts, show_progress_bar=False)
                 for i, idx in enumerate(batch_indices):
                     new_vecs[idx] = encoded_vecs[i]
             except MemoryError:
@@ -1043,7 +1072,7 @@ async def get_similar_channels_by_url(
                 for j, idx in enumerate(batch_indices):
                     try:
                         text = batch_texts[j]
-                        vec = model.encode([text], convert_to_numpy=True, show_progress_bar=False)[0]
+                        vec = (await encode_async([text], show_progress_bar=False))[0]
                         new_vecs[idx] = vec
                     except Exception as e:
                         logger.warning(f"为频道索引 {idx} 编码向量失败: {e}")
@@ -1060,7 +1089,7 @@ async def get_similar_channels_by_url(
         else:
             # 兜底：如果都没有，重新计算
             text = build_text_for_channel(info)
-            vec = model.encode([text], convert_to_numpy=True)[0]
+            vec = (await encode_async([text]))[0]
             cand_vecs_list.append(vec)
     
     # 转换为numpy数组，保持与原有代码兼容
@@ -1182,7 +1211,7 @@ async def get_similar_channels_by_url(
         # 数据库中没有有效数据，需要重新计算（但这种情况应该很少，因为构建索引时已经计算过了）
         try:
             # 获取最近视频的平均统计数据
-            stats = get_recent_videos_stats(cid, max_results=Config.CHANNEL_INFO["stats_videos_count"], use_for="search")
+            stats = await get_recent_videos_stats(cid, max_results=Config.CHANNEL_INFO["stats_videos_count"], use_for="search")
             avg_views = stats["avg_views"]
             avg_likes = stats["avg_likes"]
             
@@ -1219,7 +1248,7 @@ async def get_similar_channels_by_url(
         else:
             # 数据库中没有有效数据，需要重新计算
             try:
-                base_stats = get_recent_videos_stats(channel_id, max_results=Config.CHANNEL_INFO["stats_videos_count"], use_for="search")
+                base_stats = await get_recent_videos_stats(channel_id, max_results=Config.CHANNEL_INFO["stats_videos_count"], use_for="search")
                 base_avg_views = base_stats["avg_views"]
                 base_avg_likes = base_stats["avg_likes"]
                 base_info["avg_views"] = round(base_avg_views, 1)

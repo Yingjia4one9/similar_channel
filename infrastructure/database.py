@@ -1,6 +1,10 @@
 """
 本地数据库操作模块
 处理 SQLite 数据库的读写操作
+
+支持同步和异步两种模式：
+- 同步模式：使用 sqlite3（向后兼容）
+- 异步模式：使用 aiosqlite（推荐，非阻塞）
 """
 import json
 import os
@@ -8,16 +12,24 @@ import pickle
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta
 from queue import Queue, Empty
-from typing import Any, Dict, Generator, List
+from typing import Any, AsyncGenerator, Dict, Generator, List
 
 import numpy as np
 
 from infrastructure.logger import get_logger
 
 logger = get_logger()
+
+# 尝试导入 aiosqlite（异步数据库支持）
+try:
+    import aiosqlite
+    AIOSQLITE_AVAILABLE = True
+except ImportError:
+    AIOSQLITE_AVAILABLE = False
+    logger.warning("aiosqlite 不可用，异步数据库功能将被禁用。请运行: pip install aiosqlite")
 
 try:
     import faiss
@@ -28,6 +40,18 @@ except ImportError:
 
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "channel_index.db"))
 FAISS_INDEX_PATH = os.path.join(os.path.dirname(__file__), ".faiss_index.pkl")
+
+# ==================== 异步数据库连接管理 ====================
+# 初始化 asyncio（如果可用）
+if AIOSQLITE_AVAILABLE:
+    import asyncio
+    
+    # 全局异步数据库连接（单例模式，避免频繁创建连接）
+    _async_db_connection: aiosqlite.Connection | None = None
+    _async_db_lock = asyncio.Lock()
+else:
+    _async_db_connection = None
+    _async_db_lock = None
 
 # 全局索引缓存
 _cached_index: Any = None
@@ -586,6 +610,72 @@ def _build_faiss_index() -> tuple[Any, List[str]]:
     return index, ids
 
 
+def _sync_faiss_search(
+    base_vec: np.ndarray, 
+    max_candidates: int,
+    index: Any,
+    ids: List[str]
+) -> List[str]:
+    """
+    同步 FAISS 搜索函数，在线程池中执行。
+    
+    Args:
+        base_vec: 基频道的向量表示
+        max_candidates: 最大返回数量
+        index: FAISS 索引对象
+        ids: 频道 ID 列表
+    
+    Returns:
+        候选频道 ID 列表
+    """
+    if base_vec.ndim > 1:
+        base_vec = base_vec[0]
+    
+    # 归一化查询向量
+    query_vec = base_vec.astype('float32').reshape(1, -1)
+    faiss.normalize_L2(query_vec)
+    
+    # 搜索 top-k
+    k = min(max_candidates, len(ids))
+    distances, indices = index.search(query_vec, k)
+    
+    # 返回对应的频道 ID
+    return [ids[i] for i in indices[0] if i < len(ids)]
+
+
+def _sync_numpy_search(
+    base_vec: np.ndarray,
+    max_candidates: int,
+    ids_list: List[str],
+    vecs: List[np.ndarray]
+) -> List[str]:
+    """
+    同步 numpy 向量搜索函数，在线程池中执行。
+    
+    Args:
+        base_vec: 基频道的向量表示
+        max_candidates: 最大返回数量
+        ids_list: 频道 ID 列表
+        vecs: 向量列表
+    
+    Returns:
+        候选频道 ID 列表
+    """
+    if not vecs:
+        return []
+    
+    mat = np.vstack(vecs)
+    # 计算与 base_vec 的余弦相似度
+    if base_vec.ndim > 1:
+        base_vec = base_vec[0]
+    num = mat @ base_vec
+    denom = np.linalg.norm(mat, axis=1) * (np.linalg.norm(base_vec) + 1e-8)
+    sims = num / denom
+    
+    order = np.argsort(-sims)[:max_candidates]
+    return [ids_list[i] for i in order]
+
+
 def get_candidates_from_local_index(
     base_vec: np.ndarray, max_candidates: int = 200
 ) -> List[str]:
@@ -608,23 +698,9 @@ def get_candidates_from_local_index(
     index, ids = _build_faiss_index()
     
     if index is not None and FAISS_AVAILABLE and ids:
-        # 使用 Faiss 搜索
+        # 使用 Faiss 搜索（同步版本，用于向后兼容）
         logger.debug(f"使用FAISS索引搜索候选频道（最多{max_candidates}个）")
-        if base_vec.ndim > 1:
-            base_vec = base_vec[0]
-        
-        # 归一化查询向量
-        query_vec = base_vec.astype('float32').reshape(1, -1)
-        faiss.normalize_L2(query_vec)
-        
-        # 搜索 top-k
-        k = min(max_candidates, len(ids))
-        distances, indices = index.search(query_vec, k)
-        
-        # 返回对应的频道 ID
-        result_ids = [ids[i] for i in indices[0] if i < len(ids)]
-        logger.debug(f"FAISS搜索完成，找到{len(result_ids)}个候选频道")
-        return result_ids
+        return _sync_faiss_search(base_vec, max_candidates, index, ids)
     
     # 回退到原始方法（如果 Faiss 不可用或构建失败）
     logger.debug("使用numpy进行向量搜索（FAISS不可用或构建失败）")
@@ -1004,6 +1080,120 @@ def get_single_channel_info_from_local_db(channel_id: str) -> Dict[str, Any] | N
         return None
 
 
+def get_single_channel_info_from_local_db_with_age_check(
+    channel_id: str, 
+    max_age_days: int = 60
+) -> Dict[str, Any] | None:
+    """
+    从本地数据库读取单个频道的完整信息（带过期检查）。
+    如果数据存在且未过期，返回频道信息；否则返回 None。
+    
+    Args:
+        channel_id: 频道 ID
+        max_age_days: 数据过期时间（天），超过此时间的数据视为过期
+    
+    Returns:
+        频道信息字典，如果不存在或已过期则返回 None
+    """
+    if not os.path.exists(DB_PATH):
+        return None
+
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            
+            # 查询频道信息，同时检查是否过期
+            cutoff_date = datetime.now() - timedelta(days=max_age_days)
+            cutoff_date_str = cutoff_date.strftime("%Y-%m-%d %H:%M:%S")
+            
+            cur.execute(
+                """
+                SELECT channel_id, title, description, subscriber_count, view_count,
+                       country, language, emails, topics, audience,
+                       recent_videos, engagement_rate, view_rate, competitor_detection
+                FROM channels
+                WHERE channel_id = ? AND updated_at >= ?
+                """,
+                (channel_id, cutoff_date_str),
+            )
+            row = cur.fetchone()
+    except sqlite3.DatabaseError as e:
+        logger.error(f"从数据库获取频道信息失败 (channel_id={channel_id}): {e}", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"获取频道信息时发生未知错误 (channel_id={channel_id}): {e}", exc_info=True)
+        return None
+
+    if not row:
+        return None
+
+    try:
+        # 兼容旧版本数据库（可能没有新字段）
+        row_length = len(row)
+        if row_length >= 14:
+            ch_id, title, desc, sub_count, view_count, country, lang, emails_json, topics_json, audience_json, \
+                recent_videos_json, engagement_rate, view_rate, competitor_detection_json = row
+        else:
+            ch_id, title, desc, sub_count, view_count, country, lang, emails_json, topics_json, audience_json = row
+            recent_videos_json = None
+            engagement_rate = None
+            view_rate = None
+            competitor_detection_json = None
+        
+        # 安全解析JSON字段
+        try:
+            emails = json.loads(emails_json) if emails_json else []
+        except (json.JSONDecodeError, TypeError):
+            emails = []
+        
+        try:
+            topics = json.loads(topics_json) if topics_json else []
+        except (json.JSONDecodeError, TypeError):
+            topics = []
+        
+        try:
+            audience = json.loads(audience_json) if audience_json else []
+        except (json.JSONDecodeError, TypeError):
+            audience = []
+        
+        try:
+            recent_videos = json.loads(recent_videos_json) if recent_videos_json else []
+        except (json.JSONDecodeError, TypeError):
+            recent_videos = []
+        
+        try:
+            competitor_detection = json.loads(competitor_detection_json) if competitor_detection_json else {}
+        except (json.JSONDecodeError, TypeError):
+            competitor_detection = {
+                "has_competitor_collab": False,
+                "competitors": [],
+                "competitor_details": {}
+            }
+        
+        return {
+            "channelId": ch_id,
+            "title": title or "",
+            "description": desc or "",
+            "thumbnails": {},  # 本地库暂不存缩略图
+            "recent_videos": recent_videos,
+            "engagement_rate": float(engagement_rate) if engagement_rate is not None else 0.0,
+            "view_rate": float(view_rate) if view_rate is not None else 0.0,
+            "competitor_detection": competitor_detection,
+            "subscriberCount": int(sub_count or 0) if sub_count is not None else 0,
+            "videoCount": 0,  # 本地库暂不存视频数
+            "viewCount": int(view_count or 0) if view_count is not None else 0,
+            "defaultLanguage": lang,
+            "defaultAudioLanguage": None,
+            "country": country,
+            "emails": emails,
+            "topics": topics,
+            "audience": audience,
+        }
+    except (ValueError, TypeError, IndexError) as e:
+        logger.error(f"解析频道数据失败 (channel_id={channel_id}): {e}", exc_info=True)
+        return None
+
+
 def get_channel_basic_info_for_filtering(channel_ids: List[str]) -> Dict[str, Dict[str, Any]]:
     """
     从本地数据库批量读取频道基础信息（用于粗筛）。
@@ -1204,7 +1394,9 @@ def _process_update_queue() -> None:
             for channel_id in batch_ids:
                 try:
                     # 处理频道数据（获取信息、计算向量）
-                    info, vec = _process_channel_data(channel_id, recent_videos_count=3)
+                    # 在后台线程中运行异步函数
+                    import asyncio
+                    info, vec = asyncio.run(_process_channel_data(channel_id, recent_videos_count=3))
                     if info and vec is not None:
                         # 准备数据用于数据库更新
                         from youtube_client import _prepare_channel_data_for_db
@@ -1395,3 +1587,354 @@ def recalculate_vectors_for_channels(channel_ids: List[str]) -> int:
     except Exception as e:
         logger.error(f"重新计算向量时发生错误: {e}", exc_info=True)
         return 0
+
+
+# ==================== 异步数据库操作（使用 aiosqlite）====================
+# 注意：以下函数是同步函数的异步版本，用于非阻塞数据库操作
+
+if AIOSQLITE_AVAILABLE:
+    @asynccontextmanager
+    async def get_async_db_connection() -> AsyncGenerator[aiosqlite.Connection, None]:
+        """
+        异步数据库连接的 context manager。
+        自动处理事务提交和回滚，支持 WAL 模式。
+        
+        Usage:
+            async with get_async_db_connection() as db:
+                async with db.execute("SELECT ...") as cursor:
+                    rows = await cursor.fetchall()
+        
+        Raises:
+            aiosqlite.Error: 数据库操作错误
+        """
+        global _async_db_connection, _async_db_lock
+        
+        async with _async_db_lock:
+            # 如果连接不存在或已关闭，创建新连接
+            if _async_db_connection is None:
+                from infrastructure.config import Config
+                db_timeout = Config.get_config_value("DB_TIMEOUT", Config.DB_TIMEOUT, "YT_DB_TIMEOUT")
+                
+                _async_db_connection = await aiosqlite.connect(DB_PATH, timeout=db_timeout)
+                _async_db_connection.row_factory = aiosqlite.Row
+                
+                # 设置 WAL 模式和其他优化
+                await _async_db_connection.execute("PRAGMA journal_mode=WAL")
+                await _async_db_connection.execute("PRAGMA synchronous=NORMAL")
+                await _async_db_connection.execute("PRAGMA foreign_keys=ON")
+                
+                logger.debug("异步数据库连接已创建")
+        
+        try:
+            yield _async_db_connection
+            await _async_db_connection.commit()
+        except aiosqlite.Error as e:
+            await _async_db_connection.rollback()
+            logger.error(f"异步数据库操作错误: {e}", exc_info=True)
+            raise
+        except Exception as e:
+            await _async_db_connection.rollback()
+            logger.error(f"异步数据库操作发生未知错误: {e}", exc_info=True)
+            raise
+    
+    
+    async def get_channel_info_from_local_db_async(
+        channel_ids: List[str], 
+        max_age_days: int = 60,
+        auto_update_expired: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        异步版本：从本地数据库批量读取频道信息。
+        
+        Args:
+            channel_ids: 频道 ID 列表
+            max_age_days: 数据过期时间（天）
+            auto_update_expired: 是否自动更新过期数据
+        
+        Returns:
+            频道信息列表
+        """
+        if not os.path.exists(DB_PATH):
+            return []
+        
+        if not channel_ids:
+            return []
+        
+        logger.debug(f"[异步] 从本地数据库批量获取频道信息（{len(channel_ids)}个频道）")
+        
+        from infrastructure.config import Config
+        BATCH_SIZE = Config.DB_BATCH_SIZE
+        all_rows = []
+        
+        try:
+            async with get_async_db_connection() as db:
+                # 分批查询
+                for i in range(0, len(channel_ids), BATCH_SIZE):
+                    batch_ids = channel_ids[i:i + BATCH_SIZE]
+                    placeholders = ",".join(["?" for _ in batch_ids])
+                    
+                    async with db.execute(
+                        f"""
+                        SELECT channel_id, title, description, subscriber_count, view_count,
+                               country, language, emails, topics, audience,
+                               recent_videos, engagement_rate, view_rate, competitor_detection, updated_at
+                        FROM channels
+                        WHERE channel_id IN ({placeholders})
+                        """,
+                        batch_ids,
+                    ) as cursor:
+                        batch_rows = await cursor.fetchall()
+                        all_rows.extend(batch_rows)
+                
+                rows = all_rows
+        except aiosqlite.Error as e:
+            logger.error(f"[异步] 从数据库批量获取频道信息失败: {e}", exc_info=True)
+            return []
+        except Exception as e:
+            logger.error(f"[异步] 批量获取频道信息时发生未知错误: {e}", exc_info=True)
+            return []
+        
+        logger.debug(f"[异步] 从本地数据库获取到{len(rows)}个频道的信息")
+        
+        # 处理查询结果（与同步版本相同的逻辑）
+        row_length = len(rows[0]) if rows else 0
+        results: List[Dict[str, Any]] = []
+        
+        for row in rows:
+            try:
+                if row_length >= 15:
+                    ch_id, title, desc, sub_count, view_count, country, lang, emails_json, topics_json, audience_json, \
+                        recent_videos_json, engagement_rate, view_rate, competitor_detection_json, _ = row
+                elif row_length >= 11:
+                    ch_id, title, desc, sub_count, view_count, country, lang, emails_json, topics_json, audience_json, _ = row
+                    recent_videos_json = None
+                    engagement_rate = None
+                    view_rate = None
+                    competitor_detection_json = None
+                else:
+                    logger.warning(f"数据库行格式异常，字段数: {row_length}")
+                    continue
+                
+                # 解析 JSON 字段
+                emails = json.loads(emails_json) if emails_json else []
+                topics = json.loads(topics_json) if topics_json else []
+                audience = json.loads(audience_json) if audience_json else []
+                recent_videos = json.loads(recent_videos_json) if recent_videos_json else []
+                competitor_detection = json.loads(competitor_detection_json) if competitor_detection_json else {}
+                
+                results.append({
+                    "id": ch_id,
+                    "title": title or "",
+                    "description": desc or "",
+                    "subscriberCount": int(sub_count) if sub_count else 0,
+                    "viewCount": int(view_count) if view_count else 0,
+                    "country": country or "",
+                    "defaultLanguage": lang or "",
+                    "emails": emails,
+                    "topics": topics,
+                    "audience": audience,
+                    "recent_videos": recent_videos,
+                    "engagement_rate": float(engagement_rate) if engagement_rate is not None else None,
+                    "view_rate": float(view_rate) if view_rate is not None else None,
+                    "competitor_detection": competitor_detection,
+                })
+            except Exception as e:
+                logger.warning(f"解析频道信息失败: {e}")
+                continue
+        
+        # 检测过期数据（异步触发更新）
+        if auto_update_expired and rows:
+            expired_channel_ids: List[str] = []
+            try:
+                async with get_async_db_connection() as db:
+                    cutoff_date_str = (datetime.now() - timedelta(days=max_age_days)).strftime("%Y-%m-%d %H:%M:%S")
+                    returned_ids = [row[0] for row in rows if len(row) > 0]
+                    
+                    if returned_ids:
+                        for i in range(0, len(returned_ids), BATCH_SIZE):
+                            batch_ids = returned_ids[i:i + BATCH_SIZE]
+                            placeholders = ",".join(["?" for _ in batch_ids])
+                            async with db.execute(
+                                f"""
+                                SELECT channel_id FROM channels
+                                WHERE channel_id IN ({placeholders})
+                                AND updated_at < ?
+                                """,
+                                batch_ids + [cutoff_date_str],
+                            ) as cursor:
+                                expired_batch = [row[0] for row in await cursor.fetchall()]
+                                expired_channel_ids.extend(expired_batch)
+            except Exception as e:
+                logger.warning(f"[异步] 查询过期数据时出错: {e}")
+            
+            if expired_channel_ids:
+                logger.info(f"[异步] 检测到 {len(expired_channel_ids)} 个频道的数据已过期，将在后台更新")
+                # 使用 asyncio.create_task 触发后台更新（不阻塞）
+                asyncio.create_task(_trigger_async_update_expired_channels_async(expired_channel_ids))
+        
+        return results
+    
+    
+    async def get_embeddings_from_local_db_async(channel_ids: List[str]) -> Dict[str, np.ndarray]:
+        """
+        异步版本：从本地数据库批量读取频道向量。
+        
+        Args:
+            channel_ids: 频道 ID 列表
+        
+        Returns:
+            字典，键为 channel_id，值为向量数组
+        """
+        if not os.path.exists(DB_PATH):
+            return {}
+        
+        if not channel_ids:
+            return {}
+        
+        from infrastructure.config import Config
+        BATCH_SIZE = Config.DB_BATCH_SIZE
+        all_rows = []
+        
+        try:
+            async with get_async_db_connection() as db:
+                for i in range(0, len(channel_ids), BATCH_SIZE):
+                    batch_ids = channel_ids[i:i + BATCH_SIZE]
+                    placeholders = ",".join(["?" for _ in batch_ids])
+                    async with db.execute(
+                        f"""
+                        SELECT channel_id, embedding
+                        FROM channel_embeddings
+                        WHERE channel_id IN ({placeholders})
+                        """,
+                        batch_ids,
+                    ) as cursor:
+                        batch_rows = await cursor.fetchall()
+                        all_rows.extend(batch_rows)
+                
+                rows = all_rows
+        except aiosqlite.Error as e:
+            logger.error(f"[异步] 从数据库批量获取频道向量失败: {e}", exc_info=True)
+            return {}
+        except Exception as e:
+            logger.error(f"[异步] 批量获取频道向量时发生未知错误: {e}", exc_info=True)
+            return {}
+        
+        result: Dict[str, np.ndarray] = {}
+        for ch_id, blob in rows:
+            if blob:
+                try:
+                    vec = np.frombuffer(blob, dtype=np.float32)
+                    result[ch_id] = vec
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"[异步] 解析频道 {ch_id} 的向量数据失败: {e}")
+                    continue
+                except Exception as e:
+                    logger.warning(f"[异步] 处理频道 {ch_id} 的向量数据时出错: {e}")
+                    continue
+        return result
+    
+    
+    async def _trigger_async_update_expired_channels_async(channel_ids: List[str]) -> None:
+        """
+        异步版本：触发过期频道数据的更新。
+        
+        Args:
+            channel_ids: 需要更新的频道ID列表
+        """
+        if not channel_ids:
+            return
+        
+        # 这里可以调用异步版本的更新函数
+        # 暂时记录日志，后续可以实现完整的异步更新逻辑
+        logger.debug(f"[异步] 触发 {len(channel_ids)} 个过期频道的更新")
+        # TODO: 实现完整的异步更新逻辑
+    
+    
+    async def get_candidates_from_local_index_async(
+        base_vec: np.ndarray, 
+        max_candidates: int = 200
+    ) -> List[str]:
+        """
+        异步版本：从本地 SQLite 索引中获取候选频道 ID。
+        FAISS 搜索和 numpy 搜索都在线程池中执行，避免阻塞事件循环。
+        
+        Args:
+            base_vec: 基频道的向量表示
+            max_candidates: 最大返回数量
+        
+        Returns:
+            候选频道 ID 列表
+        """
+        if not os.path.exists(DB_PATH):
+            return []
+        
+        # 构建索引（这个操作可能涉及数据库查询，但索引构建本身是 CPU 密集型）
+        # 为了简化，我们在线程池中执行整个操作
+        loop = asyncio.get_running_loop()
+        from core.embedding import _get_executor
+        executor = _get_executor()
+        
+        # 在线程池中构建索引
+        index, ids = await loop.run_in_executor(executor, _build_faiss_index)
+        
+        if index is not None and FAISS_AVAILABLE and ids:
+            # 使用 FAISS 搜索（在线程池中执行）
+            logger.debug(f"[异步] 使用FAISS索引搜索候选频道（最多{max_candidates}个）")
+            result_ids = await loop.run_in_executor(
+                executor,
+                _sync_faiss_search,
+                base_vec,
+                max_candidates,
+                index,
+                ids
+            )
+            logger.debug(f"[异步] FAISS搜索完成，找到{len(result_ids)}个候选频道")
+            return result_ids
+        
+        # 回退到 numpy 搜索（需要先从数据库加载数据）
+        logger.debug("[异步] 使用numpy进行向量搜索（FAISS不可用或构建失败）")
+        try:
+            # 使用异步数据库查询
+            async with get_async_db_connection() as db:
+                async with db.execute(
+                    "SELECT channel_id, embedding FROM channel_embeddings WHERE embedding IS NOT NULL"
+                ) as cursor:
+                    rows = await cursor.fetchall()
+        except Exception as e:
+            logger.error(f"[异步] 从数据库加载向量数据失败（numpy回退）: {e}", exc_info=True)
+            return []
+        
+        if not rows:
+            return []
+        
+        # 解析向量数据
+        ids_list: List[str] = []
+        vecs: List[np.ndarray] = []
+        for ch_id, blob in rows:
+            if not blob:
+                continue
+            try:
+                vec = np.frombuffer(blob, dtype=np.float32)
+                ids_list.append(ch_id)
+                vecs.append(vec)
+            except (ValueError, TypeError) as e:
+                logger.warning(f"[异步] 解析频道 {ch_id} 的向量数据失败: {e}")
+                continue
+            except Exception as e:
+                logger.warning(f"[异步] 处理频道 {ch_id} 的向量数据时出错: {e}")
+                continue
+        
+        if not vecs:
+            return []
+        
+        # 在线程池中执行 numpy 搜索
+        result_ids = await loop.run_in_executor(
+            executor,
+            _sync_numpy_search,
+            base_vec,
+            max_candidates,
+            ids_list,
+            vecs
+        )
+        logger.debug(f"[异步] numpy向量搜索完成，找到{len(result_ids)}个候选频道")
+        return result_ids

@@ -35,7 +35,7 @@ def export_to_csv():
     print("导出数据库内容为CSV")
     print("=" * 80)
     
-    # 获取所有频道数据
+    # 获取所有频道数据（包含所有字段）
     cur.execute("""
         SELECT 
             channel_id,
@@ -48,6 +48,10 @@ def export_to_csv():
             emails,
             topics,
             audience,
+            recent_videos,
+            engagement_rate,
+            view_rate,
+            competitor_detection,
             updated_at
         FROM channels
         ORDER BY subscriber_count DESC
@@ -76,6 +80,10 @@ def export_to_csv():
             '邮箱',
             'Topics',
             'Audience',
+            '最近视频',
+            '互动率',
+            '观看率',
+            '竞品检测',
             '更新时间'
         ])
         
@@ -106,6 +114,52 @@ def export_to_csv():
                 except:
                     audience = ch['audience']
             
+            # 解析最近视频
+            recent_videos = ''
+            try:
+                if ch['recent_videos']:
+                    videos_list = json.loads(ch['recent_videos'])
+                    if isinstance(videos_list, list):
+                        video_titles = [v.get('title', '') if isinstance(v, dict) else str(v) for v in videos_list[:3]]
+                        recent_videos = '; '.join(video_titles)
+                        if len(videos_list) > 3:
+                            recent_videos += f" ... (+{len(videos_list)-3}个)"
+                    else:
+                        recent_videos = str(videos_list)
+            except (KeyError, TypeError, json.JSONDecodeError):
+                recent_videos = ''
+            
+            # 解析竞品检测
+            competitor_info = ''
+            try:
+                if ch['competitor_detection']:
+                    comp_data = json.loads(ch['competitor_detection'])
+                    if isinstance(comp_data, dict):
+                        if comp_data.get('has_competitor_collab'):
+                            competitors = comp_data.get('competitors', [])
+                            competitor_info = f"是; 竞品数: {len(competitors)}"
+                        else:
+                            competitor_info = '否'
+                    else:
+                        competitor_info = str(comp_data)
+            except (KeyError, TypeError, json.JSONDecodeError):
+                competitor_info = ''
+            
+            # 获取互动率和观看率
+            engagement_rate = ''
+            try:
+                if ch['engagement_rate'] is not None:
+                    engagement_rate = f"{ch['engagement_rate']:.4f}"
+            except (KeyError, TypeError):
+                engagement_rate = ''
+            
+            view_rate = ''
+            try:
+                if ch['view_rate'] is not None:
+                    view_rate = f"{ch['view_rate']:.4f}"
+            except (KeyError, TypeError):
+                view_rate = ''
+            
             writer.writerow([
                 ch['channel_id'],
                 ch['title'] or '',
@@ -117,6 +171,10 @@ def export_to_csv():
                 emails,
                 topics,
                 audience,
+                recent_videos,
+                engagement_rate,
+                view_rate,
+                competitor_info,
                 ch['updated_at'] or ''
             ])
     
@@ -152,7 +210,7 @@ def export_to_excel():
     print("导出数据库内容为Excel")
     print("=" * 80)
     
-    # 获取所有频道数据
+    # 获取所有频道数据（包含所有字段）
     cur.execute("""
         SELECT 
             channel_id,
@@ -165,6 +223,10 @@ def export_to_excel():
             emails,
             topics,
             audience,
+            recent_videos,
+            engagement_rate,
+            view_rate,
+            competitor_detection,
             updated_at
         FROM channels
         ORDER BY subscriber_count DESC
@@ -199,6 +261,10 @@ def export_to_excel():
         '邮箱',
         'Topics',
         'Audience',
+        '最近视频',
+        '互动率',
+        '观看率',
+        '竞品检测',
         '更新时间'
     ]
     
@@ -235,6 +301,52 @@ def export_to_excel():
             except:
                 audience = ch['audience']
         
+        # 解析最近视频
+        recent_videos = ''
+        try:
+            if ch['recent_videos']:
+                videos_list = json.loads(ch['recent_videos'])
+                if isinstance(videos_list, list):
+                    video_titles = [v.get('title', '') if isinstance(v, dict) else str(v) for v in videos_list[:3]]
+                    recent_videos = '; '.join(video_titles)
+                    if len(videos_list) > 3:
+                        recent_videos += f" ... (+{len(videos_list)-3}个)"
+                else:
+                    recent_videos = str(videos_list)
+        except (KeyError, TypeError, json.JSONDecodeError):
+            recent_videos = ''
+        
+        # 解析竞品检测
+        competitor_info = ''
+        try:
+            if ch['competitor_detection']:
+                comp_data = json.loads(ch['competitor_detection'])
+                if isinstance(comp_data, dict):
+                    if comp_data.get('has_competitor_collab'):
+                        competitors = comp_data.get('competitors', [])
+                        competitor_info = f"是; 竞品数: {len(competitors)}"
+                    else:
+                        competitor_info = '否'
+                else:
+                    competitor_info = str(comp_data)
+        except (KeyError, TypeError, json.JSONDecodeError):
+            competitor_info = ''
+        
+        # 获取互动率和观看率
+        engagement_rate = ''
+        try:
+            if ch['engagement_rate'] is not None:
+                engagement_rate = ch['engagement_rate']
+        except (KeyError, TypeError):
+            engagement_rate = ''
+        
+        view_rate = ''
+        try:
+            if ch['view_rate'] is not None:
+                view_rate = ch['view_rate']
+        except (KeyError, TypeError):
+            view_rate = ''
+        
         ws.cell(row=row_idx, column=1, value=ch['channel_id'])
         ws.cell(row=row_idx, column=2, value=ch['title'] or '')
         ws.cell(row=row_idx, column=3, value=ch['description'] or '')
@@ -245,10 +357,14 @@ def export_to_excel():
         ws.cell(row=row_idx, column=8, value=emails)
         ws.cell(row=row_idx, column=9, value=topics)
         ws.cell(row=row_idx, column=10, value=audience)
-        ws.cell(row=row_idx, column=11, value=ch['updated_at'] or '')
+        ws.cell(row=row_idx, column=11, value=recent_videos)
+        ws.cell(row=row_idx, column=12, value=engagement_rate)
+        ws.cell(row=row_idx, column=13, value=view_rate)
+        ws.cell(row=row_idx, column=14, value=competitor_info)
+        ws.cell(row=row_idx, column=15, value=ch['updated_at'] or '')
     
     # 调整列宽
-    column_widths = [20, 30, 50, 12, 15, 8, 8, 30, 40, 40, 20]
+    column_widths = [20, 30, 50, 12, 15, 8, 8, 30, 40, 40, 50, 10, 10, 20, 20]
     for col_idx, width in enumerate(column_widths, 1):
         ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = width
     

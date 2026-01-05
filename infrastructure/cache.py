@@ -105,54 +105,115 @@ _channel_videos_cache = SimpleCache(
 
 def cached_channel_info(ttl: int | None = None):
     """
-    装饰器：缓存频道信息
+    装饰器：缓存频道信息（支持异步函数）
     
     Args:
         ttl: 缓存过期时间（秒），如果为None则使用配置的默认值
     """
+    import asyncio
+    import inspect
+    
     if ttl is None:
         ttl = Config.get_config_value("cache.ttl.channel_info", Config.CACHE_TTL["channel_info"])
     def decorator(func: F) -> F:
-        @wraps(func)
-        def wrapper(channel_id: str, *args, **kwargs):
-            cache_key = f"channel_info:{channel_id}"
-            cached_value = _channel_info_cache.get(cache_key)
-            if cached_value is not None:
-                logger.debug(f"从缓存获取频道信息: {channel_id}")
-                return cached_value
-            
-            result = func(channel_id, *args, **kwargs)
-            _channel_info_cache.set(cache_key, result, ttl=ttl)
-            return result
+        # 检查是否是异步函数
+        is_async = inspect.iscoroutinefunction(func)
         
-        return wrapper  # type: ignore
+        if is_async:
+            @wraps(func)
+            async def async_wrapper(channel_id: str, *args, **kwargs):
+                cache_key = f"channel_info:{channel_id}"
+                cached_value = _channel_info_cache.get(cache_key)
+                if cached_value is not None:
+                    logger.debug(f"从缓存获取频道信息: {channel_id}")
+                    # 确保返回的不是协程对象，而是实际结果
+                    if inspect.iscoroutine(cached_value):
+                        # 如果缓存的是协程对象（不应该发生），重新计算
+                        logger.warning(f"缓存中发现了协程对象，重新计算: {channel_id}")
+                        result = await func(channel_id, *args, **kwargs)
+                        _channel_info_cache.set(cache_key, result, ttl=ttl)
+                        return result
+                    return cached_value
+                
+                # 调用异步函数并等待结果
+                result = await func(channel_id, *args, **kwargs)
+                # 只缓存实际结果，不缓存协程对象
+                _channel_info_cache.set(cache_key, result, ttl=ttl)
+                return result
+            
+            return async_wrapper  # type: ignore
+        else:
+            @wraps(func)
+            def sync_wrapper(channel_id: str, *args, **kwargs):
+                cache_key = f"channel_info:{channel_id}"
+                cached_value = _channel_info_cache.get(cache_key)
+                if cached_value is not None:
+                    logger.debug(f"从缓存获取频道信息: {channel_id}")
+                    return cached_value
+                
+                result = func(channel_id, *args, **kwargs)
+                _channel_info_cache.set(cache_key, result, ttl=ttl)
+                return result
+            
+            return sync_wrapper  # type: ignore
     return decorator
 
 
 def cached_channel_videos(ttl: int | None = None):
     """
-    装饰器：缓存频道视频列表
+    装饰器：缓存频道视频列表（支持异步函数）
     
     Args:
         ttl: 缓存过期时间（秒），如果为None则使用配置的默认值
     """
+    import asyncio
+    import inspect
+    
     if ttl is None:
         ttl = Config.get_config_value("cache.ttl.channel_videos", Config.CACHE_TTL["channel_videos"])
     def decorator(func: F) -> F:
-        @wraps(func)
-        def wrapper(channel_id: str, *args, **kwargs):
-            max_results = kwargs.get('max_results', 5)
-            cache_key = f"channel_videos:{channel_id}:{max_results}"
-            cached_value = _channel_videos_cache.get(cache_key)
-            if cached_value is not None:
-                logger.debug(f"从缓存获取频道视频: {channel_id}")
-                return cached_value
-            
-            result = func(channel_id, *args, **kwargs)
-            _channel_videos_cache.set(cache_key, result, ttl=ttl)
-            return result
+        # 检查是否是异步函数
+        is_async = inspect.iscoroutinefunction(func)
         
-        return wrapper  # type: ignore
+        if is_async:
+            @wraps(func)
+            async def async_wrapper(channel_id: str, *args, **kwargs):
+                max_results = kwargs.get('max_results', 5)
+                cache_key = f"channel_videos:{channel_id}:{max_results}"
+                cached_value = _channel_videos_cache.get(cache_key)
+                if cached_value is not None:
+                    logger.debug(f"从缓存获取频道视频: {channel_id}")
+                    # 确保返回的不是协程对象，而是实际结果
+                    if inspect.iscoroutine(cached_value):
+                        # 如果缓存的是协程对象（不应该发生），重新计算
+                        logger.warning(f"缓存中发现了协程对象，重新计算: {channel_id}")
+                        result = await func(channel_id, *args, **kwargs)
+                        _channel_videos_cache.set(cache_key, result, ttl=ttl)
+                        return result
+                    return cached_value
+                
+                # 调用异步函数并等待结果
+                result = await func(channel_id, *args, **kwargs)
+                # 只缓存实际结果，不缓存协程对象
+                _channel_videos_cache.set(cache_key, result, ttl=ttl)
+                return result
+            
+            return async_wrapper  # type: ignore
+        else:
+            @wraps(func)
+            def sync_wrapper(channel_id: str, *args, **kwargs):
+                max_results = kwargs.get('max_results', 5)
+                cache_key = f"channel_videos:{channel_id}:{max_results}"
+                cached_value = _channel_videos_cache.get(cache_key)
+                if cached_value is not None:
+                    logger.debug(f"从缓存获取频道视频: {channel_id}")
+                    return cached_value
+                
+                result = func(channel_id, *args, **kwargs)
+                _channel_videos_cache.set(cache_key, result, ttl=ttl)
+                return result
+            
+            return sync_wrapper  # type: ignore
     return decorator
 
 

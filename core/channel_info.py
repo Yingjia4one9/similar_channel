@@ -2,6 +2,7 @@
 频道信息获取模块
 处理频道基本信息、视频列表、统计数据等
 """
+import asyncio
 import time
 from typing import Any, Dict, List
 
@@ -24,7 +25,7 @@ _batch_request_stats = {
 
 
 @cached_channel_info(ttl=7200)  # 缓存2小时
-def get_channel_basic_info(channel_id: str, use_for: str | None = None) -> Dict[str, Any]:
+async def get_channel_basic_info(channel_id: str, use_for: str | None = None) -> Dict[str, Any]:
     """
     获取频道基础信息。
     
@@ -39,7 +40,7 @@ def get_channel_basic_info(channel_id: str, use_for: str | None = None) -> Dict[
         ValueError: 如果找不到该频道
     """
     try:
-        data = yt_get(
+        data = await yt_get(
             "channels",
             {
                 "part": "snippet,statistics",
@@ -89,7 +90,7 @@ def get_channel_basic_info(channel_id: str, use_for: str | None = None) -> Dict[
     }
 
 
-def get_recent_video_ids(channel_id: str, max_results: int | None = None, use_for: str | None = None) -> List[str]:
+async def get_recent_video_ids(channel_id: str, max_results: int | None = None, use_for: str | None = None) -> List[str]:
     """
     获取该频道最近发布的一些视频 ID。
     
@@ -103,7 +104,7 @@ def get_recent_video_ids(channel_id: str, max_results: int | None = None, use_fo
     """
     max_results = max_results or Config.CHANNEL_INFO["recent_videos_count"]
     try:
-        data = yt_get(
+        data = await yt_get(
             "search",
             {
                 "part": "snippet",
@@ -139,7 +140,7 @@ def get_recent_video_ids(channel_id: str, max_results: int | None = None, use_fo
 
 
 @cached_channel_videos(ttl=1800)  # 缓存30分钟
-def get_recent_video_snippets_for_channel(
+async def get_recent_video_snippets_for_channel(
     channel_id: str, max_results: int | None = None, use_for: str | None = None
 ) -> List[Dict[str, Any]]:
     """
@@ -156,7 +157,7 @@ def get_recent_video_snippets_for_channel(
     """
     max_results = max_results or Config.CHANNEL_INFO["recent_videos_count"]
     try:
-        data = yt_get(
+        data = await yt_get(
             "search",
             {
                 "part": "snippet",
@@ -206,7 +207,7 @@ def get_recent_video_snippets_for_channel(
     return videos
 
 
-def get_recent_videos_stats(channel_id: str, max_results: int | None = None, use_for: str | None = None) -> Dict[str, float]:
+async def get_recent_videos_stats(channel_id: str, max_results: int | None = None, use_for: str | None = None) -> Dict[str, float]:
     """
     获取频道最近视频的统计数据（观看数、点赞数、评论数），用于计算 E.R. 和 V.R.。
     返回平均观看数、平均点赞数、平均评论数。
@@ -224,7 +225,7 @@ def get_recent_videos_stats(channel_id: str, max_results: int | None = None, use
     """
     max_results = max_results or Config.CHANNEL_INFO["stats_videos_count"]
     # 先获取最近视频的 ID
-    video_ids = get_recent_video_ids(channel_id, max_results=max_results, use_for=use_for)
+    video_ids = await get_recent_video_ids(channel_id, max_results=max_results, use_for=use_for)
     if not video_ids:
         return {"avg_views": 0.0, "avg_likes": 0.0, "avg_comments": 0.0}
     
@@ -236,7 +237,7 @@ def get_recent_videos_stats(channel_id: str, max_results: int | None = None, use
     for i in range(0, len(video_ids), 50):
         batch = video_ids[i : i + 50]
         try:
-            data = yt_get(
+            data = await yt_get(
                 "videos",
                 {
                     "part": "statistics",
@@ -277,7 +278,7 @@ def get_recent_videos_stats(channel_id: str, max_results: int | None = None, use
     }
 
 
-def batch_get_channels_info(channel_ids: List[str], use_for: str | None = None) -> List[Dict[str, Any]]:
+async def batch_get_channels_info(channel_ids: List[str], use_for: str | None = None) -> List[Dict[str, Any]]:
     """
     按照 YouTube API 限制，一次最多查 50 个频道，并在批量失败时回退到单请求。
     支持配置化批量大小，并记录批量请求统计（CP-y3-09：批量请求优化）。
@@ -308,7 +309,7 @@ def batch_get_channels_info(channel_ids: List[str], use_for: str | None = None) 
         batch_results: List[Dict[str, Any]] = []
         batch_start_time = time.time()
         try:
-            data = yt_get(
+            data = await yt_get(
                 "channels",
                 {
                     "part": "snippet,statistics",
@@ -333,7 +334,7 @@ def batch_get_channels_info(channel_ids: List[str], use_for: str | None = None) 
             _batch_request_stats["total_single_requests"] += len(batch)
             for cid in batch:
                 try:
-                    batch_results.append(get_channel_basic_info(cid))
+                    batch_results.append(await get_channel_basic_info(cid))
                     fallback_singles += 1
                     _batch_request_stats["total_channels_single"] += 1
                 except Exception as single_err:
@@ -346,7 +347,7 @@ def batch_get_channels_info(channel_ids: List[str], use_for: str | None = None) 
             _batch_request_stats["total_single_requests"] += len(batch)
             for cid in batch:
                 try:
-                    batch_results.append(get_channel_basic_info(cid))
+                    batch_results.append(await get_channel_basic_info(cid))
                     fallback_singles += 1
                     _batch_request_stats["total_channels_single"] += 1
                 except Exception as single_err:
@@ -383,7 +384,7 @@ def batch_get_channels_info(channel_ids: List[str], use_for: str | None = None) 
             _batch_request_stats["total_single_requests"] += len(missing_ids)
         for cid in missing_ids:
             try:
-                batch_results.append(get_channel_basic_info(cid))
+                batch_results.append(await get_channel_basic_info(cid))
                 fallback_singles += 1
                 _batch_request_stats["total_channels_single"] += 1
             except Exception as single_err:

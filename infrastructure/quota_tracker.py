@@ -1,6 +1,10 @@
 """
 YouTube API 配额跟踪模块
 跟踪每次 API 调用的配额消耗，提供配额使用统计和查询功能
+
+注意：YouTube Data API 配额在太平洋时间（PT）00:00 刷新，而非 UTC 00:00
+- 冬令时（PST UTC-8）：PT 00:00 = UTC 08:00
+- 夏令时（PDT UTC-7）：PT 00:00 = UTC 07:00
 """
 import json
 import os
@@ -54,6 +58,71 @@ _rate_limit_lock = threading.Lock()
 _quota_record_count = 0
 _quota_record_count_lock = threading.Lock()
 _ALERT_CHECK_INTERVAL = 10  # 每10次配额记录检查一次告警
+
+
+def get_pacific_time_today_start() -> datetime:
+    """
+    获取太平洋时间（PT）今天的开始时间（00:00:00）
+    
+    YouTube Data API 配额在太平洋时间 00:00 刷新，需要考虑夏令时：
+    - 冬令时（PST UTC-8）：11月~次年3月
+    - 夏令时（PDT UTC-7）：3月~11月
+    
+    Returns:
+        太平洋时间今天 00:00:00 对应的 UTC datetime 对象
+    """
+    now_utc = datetime.now(timezone.utc)
+    
+    # 判断是否在夏令时期间
+    # 夏令时：3月第二个星期日 02:00 开始，11月第一个星期日 02:00 结束
+    # 简化判断：3月~10月通常是夏令时，11月~次年2月通常是冬令时
+    
+    month = now_utc.month
+    day = now_utc.day
+    
+    # 夏令时（PDT UTC-7）：3月~11月
+    # 冬令时（PST UTC-8）：11月~次年3月
+    if month >= 3 and month <= 10:
+        # 夏令时期间（3月~10月）
+        # 但需要精确判断：3月第二个星期日之前和11月第一个星期日之后是冬令时
+        # 简化处理：3月15日之后到11月第一个星期日之前是夏令时
+        if month == 3:
+            # 3月：第二个星期日之后才是夏令时（简化：3月15日之后）
+            is_dst = day >= 15
+        elif month == 11:
+            # 11月：第一个星期日之前是夏令时（简化：11月第一个星期日之前）
+            # 2024年11月第一个星期日是11月3日
+            # 简化：11月7日之前是夏令时
+            is_dst = day < 7
+        else:
+            # 4月~10月：肯定是夏令时
+            is_dst = True
+    else:
+        # 11月~次年2月：通常是冬令时
+        # 但11月第一个星期日之前可能是夏令时
+        if month == 11:
+            # 11月：第一个星期日之前是夏令时（简化：11月7日之前）
+            is_dst = day < 7
+        else:
+            # 12月~次年2月：肯定是冬令时
+            is_dst = False
+    
+    # 计算太平洋时间今天 00:00:00 对应的 UTC 时间
+    if is_dst:
+        # 夏令时（PDT UTC-7）：PT 00:00 = UTC 07:00
+        pt_offset_hours = 7
+    else:
+        # 冬令时（PST UTC-8）：PT 00:00 = UTC 08:00
+        pt_offset_hours = 8
+    
+    # 获取太平洋时间今天的日期（使用 UTC 时间减去偏移量来获取 PT 日期）
+    pt_now = now_utc - timedelta(hours=pt_offset_hours)
+    pt_today_start = pt_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # 转换回 UTC 时间
+    utc_today_start = pt_today_start + timedelta(hours=pt_offset_hours)
+    
+    return utc_today_start.replace(tzinfo=timezone.utc)
 
 
 def _ensure_quota_schema(conn: sqlite3.Connection) -> None:
@@ -334,7 +403,9 @@ def get_quota_usage_today(daily_quota: int = DEFAULT_DAILY_QUOTA, use_for: Optio
         - fail_count: 失败次数
         - use_for: 用途标识
     """
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    # 使用太平洋时间的今天开始时间（YouTube 配额刷新时间）
+    today_start_utc = get_pacific_time_today_start()
+    today_start = today_start_utc.isoformat()
     
     try:
         with get_quota_db_connection() as conn:
@@ -407,8 +478,10 @@ def get_quota_usage_logs(
     Returns:
         包含日志列表和统计信息的字典
     """
-    start_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    start_date = start_date.replace(day=start_date.day - days + 1).isoformat()
+    # 使用太平洋时间的今天开始时间，然后往前推 days 天
+    today_start_utc = get_pacific_time_today_start()
+    start_date = today_start_utc - timedelta(days=days - 1)
+    start_date = start_date.isoformat()
     
     logs: List[Dict[str, Any]] = []
     try:
@@ -463,8 +536,10 @@ def get_quota_usage_by_endpoint(days: int = 1, use_for: Optional[str] = None) ->
     Returns:
         字典，键为 endpoint，值为包含 cost 和 count 的字典
     """
-    start_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    start_date = start_date.replace(day=start_date.day - days + 1).isoformat()
+    # 使用太平洋时间的今天开始时间，然后往前推 days 天
+    today_start_utc = get_pacific_time_today_start()
+    start_date = today_start_utc - timedelta(days=days - 1)
+    start_date = start_date.isoformat()
     
     try:
         with get_quota_db_connection() as conn:
@@ -558,8 +633,10 @@ def get_fallback_stats(days: int = 1) -> Dict:
         - by_type: 按降级类型统计的字典
         - by_endpoint: 按端点统计的字典
     """
-    start_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    start_date = start_date.replace(day=start_date.day - days + 1).isoformat()
+    # 使用太平洋时间的今天开始时间，然后往前推 days 天
+    today_start_utc = get_pacific_time_today_start()
+    start_date = today_start_utc - timedelta(days=days - 1)
+    start_date = start_date.isoformat()
     
     try:
         with get_quota_db_connection() as conn:
@@ -640,8 +717,10 @@ def reset_quota_stats() -> None:
     """
     清理旧的配额统计数据（保留最近30天的数据）
     """
-    cutoff_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    cutoff_date = cutoff_date.replace(day=cutoff_date.day - 30).isoformat()
+    # 使用太平洋时间的今天开始时间，然后往前推 30 天
+    today_start_utc = get_pacific_time_today_start()
+    cutoff_date = today_start_utc - timedelta(days=30)
+    cutoff_date = cutoff_date.isoformat()
     
     try:
         with _quota_lock:
@@ -661,6 +740,58 @@ def reset_quota_stats() -> None:
                 logger.info(f"清理了 {deleted_usage} 条旧的配额使用记录和 {deleted_fallback} 条降级统计记录")
     except Exception as e:
         logger.warning(f"清理配额统计数据失败: {e}")
+
+
+def clear_today_quota_records(use_for: Optional[str] = None) -> Dict[str, int]:
+    """
+    清理今天的配额记录（用于手动重置配额统计）
+    
+    当 YouTube 配额已重置但程序仍显示高使用率时，可以使用此函数清理今天的记录。
+    
+    Args:
+        use_for: API Key 用途标识（"index" 或 "search"），None 表示清理所有
+    
+    Returns:
+        包含删除记录数的字典
+    """
+    # 使用太平洋时间的今天开始时间（YouTube 配额刷新时间）
+    today_start_utc = get_pacific_time_today_start()
+    today_start = today_start_utc.isoformat()
+    
+    try:
+        with _quota_lock:
+            with get_quota_db_connection() as conn:
+                cur = conn.cursor()
+                
+                if use_for is not None:
+                    cur.execute(
+                        "DELETE FROM quota_usage WHERE timestamp >= ? AND use_for = ?",
+                        (today_start, use_for),
+                    )
+                else:
+                    cur.execute(
+                        "DELETE FROM quota_usage WHERE timestamp >= ?",
+                        (today_start,),
+                    )
+                
+                deleted_count = cur.rowcount
+                conn.commit()
+                
+                label = use_for if use_for else "all"
+                logger.info(f"清理了 {deleted_count} 条今天的配额记录 (use_for={label})")
+                
+                return {
+                    "deleted_count": deleted_count,
+                    "use_for": use_for,
+                    "today_start": today_start,
+                }
+    except Exception as e:
+        logger.warning(f"清理今天的配额记录失败: {e}")
+        return {
+            "deleted_count": 0,
+            "use_for": use_for,
+            "error": str(e),
+        }
 
 
 def clean_legacy_quota_records(dry_run: bool = False) -> Dict[str, int]:
@@ -991,8 +1122,9 @@ def get_quota_warnings(
     Returns:
         告警记录列表
     """
-    start_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    start_date = start_date.replace(day=start_date.day - days + 1)
+    # 使用太平洋时间的今天开始时间，然后往前推 days 天
+    today_start_utc = get_pacific_time_today_start()
+    start_date = today_start_utc - timedelta(days=days - 1)
     start_date_str = start_date.isoformat()
     
     try:
@@ -1086,8 +1218,9 @@ def get_quota_statistics(days: int = 7, daily_quota: int = DEFAULT_DAILY_QUOTA, 
         - by_day: 按天统计
         - use_for: 用途标识
     """
-    start_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    start_date = start_date.replace(day=start_date.day - days + 1)
+    # 使用太平洋时间的今天开始时间，然后往前推 days 天
+    today_start_utc = get_pacific_time_today_start()
+    start_date = today_start_utc - timedelta(days=days - 1)
     start_date_str = start_date.isoformat()
     
     try:

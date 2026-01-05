@@ -2,7 +2,12 @@
 嵌入向量计算模块
 处理文本向量化、标签推理等功能
 优化版：支持标签互斥组、分层阈值、预计算归一化缓存
+
+异步优化：CPU 密集型任务（模型编码）使用线程池执行，避免阻塞事件循环
 """
+import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Set, Tuple, Union
 
 import numpy as np
@@ -25,6 +30,149 @@ _audience_embeds_norm: np.ndarray | None = None
 # 标签索引映射（用于快速查找）
 _topic_label_to_idx: Dict[str, int] | None = None
 _audience_label_to_idx: Dict[str, int] | None = None
+
+# ==================== 线程池管理器（用于 CPU 密集型任务）====================
+# 全局线程池，用于执行模型编码等 CPU 密集型任务
+_executor: ThreadPoolExecutor | None = None
+
+# 向量编码并发控制信号量（限制同时进行向量编码的线程数，避免内存不足）
+# 默认最多 2 个线程同时进行向量编码，减少内存压力
+# 使用 threading.Semaphore 以便跨线程和事件循环共享
+_encoding_semaphore: threading.Semaphore | None = None
+_encoding_semaphore_lock = threading.Lock()
+
+
+def _get_encoding_semaphore() -> threading.Semaphore:
+    """
+    获取向量编码信号量（单例模式）。
+    用于限制同时进行向量编码的线程数，避免内存不足。
+    使用 threading.Semaphore 以便跨线程和事件循环共享。
+    
+    Returns:
+        threading.Semaphore 实例
+    """
+    global _encoding_semaphore
+    if _encoding_semaphore is None:
+        with _encoding_semaphore_lock:
+            if _encoding_semaphore is None:
+                # 从配置获取最大并发数，默认 2（减少内存压力）
+                from infrastructure.config import Config
+                max_concurrent = Config.get_config_value(
+                    "embedding.max_concurrent_encoding",
+                    2,  # 默认最多 2 个线程同时编码，避免内存不足
+                    "YT_EMBEDDING_MAX_CONCURRENT"
+                )
+                # 使用 threading.Semaphore 以便跨线程共享
+                _encoding_semaphore = threading.Semaphore(max_concurrent)
+    return _encoding_semaphore
+
+
+def _get_executor() -> ThreadPoolExecutor:
+    """
+    获取全局线程池实例（单例模式）。
+    线程池大小根据配置和 CPU 核心数自动调整。
+    
+    Returns:
+        ThreadPoolExecutor 实例
+    """
+    global _executor
+    if _executor is None:
+        # 从配置获取线程数，默认使用 CPU 核心数
+        from infrastructure.config import Config
+        max_workers = Config.get_config_value(
+            "embedding.thread_pool_size",
+            Config.CONCURRENT_PROCESSING.get("search_workers", 4),
+            "YT_EMBEDDING_THREAD_POOL_SIZE"
+        )
+        _executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="embedding")
+    return _executor
+
+
+def _sync_encode(model: SentenceTransformer, texts: List[str], **kwargs) -> np.ndarray:
+    """
+    同步编码函数，在线程池中执行。
+    这是 model.encode 的包装函数，用于在线程池中运行。
+    
+    Args:
+        model: SentenceTransformer 模型实例
+        texts: 要编码的文本列表
+        **kwargs: 传递给 model.encode 的其他参数
+    
+    Returns:
+        编码后的向量数组
+    """
+    return model.encode(texts, convert_to_numpy=True, **kwargs)
+
+
+async def encode_async(texts: List[str], **kwargs) -> np.ndarray:
+    """
+    异步编码函数，在线程池中执行模型编码，避免阻塞事件循环。
+    使用信号量限制并发数，避免内存不足。
+    
+    Args:
+        texts: 要编码的文本列表
+        **kwargs: 传递给 model.encode 的其他参数（如 batch_size, show_progress_bar）
+    
+    Returns:
+        编码后的向量数组
+    
+    Example:
+        vecs = await encode_async(["text1", "text2"], batch_size=32)
+    """
+    if not texts:
+        return np.array([])
+    
+    # 获取信号量，限制同时进行编码的线程数
+    semaphore = _get_encoding_semaphore()
+    
+    # 使用 threading.Semaphore，需要手动获取和释放
+    semaphore.acquire()
+    try:
+        # #region agent log
+        try:
+            import json
+            import time
+            with open(r'c:\Users\A\Desktop\yt-similar-backend\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"core/embedding.py:encode_async:ACQUIRE","message":"获取编码信号量","data":{"texts_count":len(texts),"semaphore_value":semaphore._value},"timestamp":int(time.time()*1000)}) + '\n')
+        except: pass
+        # #endregion
+        
+        model = get_embed_model()
+        loop = asyncio.get_running_loop()
+        executor = _get_executor()
+        
+        # 使用 functools.partial 来传递 kwargs，因为 run_in_executor 不接受关键字参数
+        from functools import partial
+        sync_encode_with_kwargs = partial(_sync_encode, model, texts, **kwargs)
+        
+        try:
+            # 在线程池中执行编码任务
+            result = await loop.run_in_executor(executor, sync_encode_with_kwargs)
+            # #region agent log
+            try:
+                with open(r'c:\Users\A\Desktop\yt-similar-backend\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"core/embedding.py:encode_async:SUCCESS","message":"编码成功","data":{"texts_count":len(texts),"result_shape":list(result.shape) if hasattr(result,'shape') else None},"timestamp":int(time.time()*1000)}) + '\n')
+            except: pass
+            # #endregion
+            return result
+        except OSError as e:
+            # #region agent log
+            try:
+                with open(r'c:\Users\A\Desktop\yt-similar-backend\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"core/embedding.py:encode_async:OS_ERROR","message":"编码时内存错误","data":{"error":str(e),"error_type":type(e).__name__,"error_code":getattr(e,'winerror',None)},"timestamp":int(time.time()*1000)}) + '\n')
+            except: pass
+            # #endregion
+            # 内存不足错误，重新抛出（信号量会在 finally 中释放）
+            raise
+    finally:
+        # 确保释放信号量
+        semaphore.release()
+        # #region agent log
+        try:
+            with open(r'c:\Users\A\Desktop\yt-similar-backend\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"core/embedding.py:encode_async:RELEASE","message":"释放编码信号量","data":{"texts_count":len(texts)},"timestamp":int(time.time()*1000)}) + '\n')
+        except: pass
+        # #endregion
 
 
 def get_embed_model() -> SentenceTransformer:

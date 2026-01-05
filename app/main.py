@@ -1,7 +1,7 @@
 import asyncio
 import json
 from typing import Annotated
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -34,6 +34,7 @@ from infrastructure.result_cache import (
     generate_cache_key,
 )
 from infrastructure.xss_protection import validate_and_sanitize_request
+from infrastructure.validation import validate_channel_url
 from core.youtube_client import get_similar_channels_by_url
 from core.channel_info import get_batch_request_stats
 
@@ -108,11 +109,14 @@ class SimilarChannelRequest(BaseModel):
     
     @field_validator('channel_url')
     @classmethod
-    def validate_channel_url(cls, v: str) -> str:
-        """验证频道链接不为空"""
+    def validate_channel_url_field(cls, v: str) -> str:
+        """验证频道链接格式（使用统一的验证函数）"""
         if not v or not isinstance(v, str) or not v.strip():
             raise ValueError("频道链接不能为空")
-        return v.strip()
+        v = v.strip()
+        if not validate_channel_url(v):
+            raise ValueError("无效的频道URL格式")
+        return v
     
     @model_validator(mode='after')
     def validate_subscriber_range(self):
@@ -133,10 +137,14 @@ class SimilarChannelResponse(BaseModel):
     bd_summary: dict | None = Field(default=None, description="BD模式统计摘要（仅在bd_mode=True时返回）")
 
 
-async def execute_search(payload: SimilarChannelRequest) -> dict:
+async def execute_search(payload: SimilarChannelRequest, background_tasks: BackgroundTasks | None = None) -> dict:
     """
     执行相似频道搜索（提取重复逻辑）。
     参数验证已由 Pydantic 自动处理。
+    
+    Args:
+        payload: 搜索请求参数
+        background_tasks: FastAPI BackgroundTasks 实例，用于后台任务
     """
     try:
         # XSS防护：验证和清理请求参数（CP-y5-07）
@@ -193,11 +201,11 @@ async def execute_search(payload: SimilarChannelRequest) -> dict:
 
 
 @app.post("/similar-channels", response_model=SimilarChannelResponse)
-async def similar_channels(payload: SimilarChannelRequest):
+async def similar_channels(payload: SimilarChannelRequest, background_tasks: BackgroundTasks):
     """
     输入一个 YouTube 频道链接，返回若干相似频道及相似度。
     """
-    return await execute_search(payload)
+    return await execute_search(payload, background_tasks)
 
 
 class ExportRequest(BaseModel):
@@ -246,7 +254,8 @@ async def similar_channels_export(payload: ExportRequest):
             preferred_region=payload.preferred_region,
             min_similarity=payload.min_similarity,
         )
-        results = await execute_search(search_payload)
+        # 导出接口不需要后台任务（结果已生成）
+        results = await execute_search(search_payload, background_tasks=None)
 
     base = results["base_channel"]
     similars = results["similar_channels"]
@@ -362,7 +371,7 @@ async def similar_channels_export(payload: ExportRequest):
 
 
 @app.post("/similar-channels/stream")
-async def similar_channels_stream(payload: SimilarChannelRequest):
+async def similar_channels_stream(payload: SimilarChannelRequest, background_tasks: BackgroundTasks):
     """
     流式返回相似频道搜索结果，使用 Server-Sent Events (SSE) 推送进度更新。
     """
